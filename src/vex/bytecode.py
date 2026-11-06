@@ -63,7 +63,7 @@ def _fmt_arg(op: int, arg: Any) -> str:
         return f"{arg[0].name} captures={arg[1]}"
     if op in (CALL_BI, CALL_BIV):
         impl, n = arg
-        return f"{getattr(impl, '__name__', 'builtin')}/{n}"
+        return f"{getattr(impl, '__name__', 'builtin').lstrip('_')}/{n}"
     if op == MAKE_ADT:
         info, tag, n = arg
         return f"{info.name}.{info.variants[tag]}/{n}"

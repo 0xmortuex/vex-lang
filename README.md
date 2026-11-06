@@ -179,6 +179,8 @@ instructions are dispatched first. Anything more would be a different VM.
   `{` in a string starts an interpolation; write `\{` for a literal brace.
 - **Type inference is local.** A method call needs the receiver's type to be known at that point
   (`|x| x.len()` fails until `x` has a type; annotate it).
+- **Very deep values**: comparing or printing a structure nested thousands of levels deep (a 5000-element
+  linked list) can hit Python's recursion limits on some Python versions; that is reported as a runtime error, not a crash.
 - **`stdin` / files**: only whole-file UTF-8 reads and writes, and line reads from stdin.
 - Debugging aids stop at stack traces: no debugger, no profiler, no source maps for the REPL beyond `<repl:N>`.
 

@@ -189,3 +189,31 @@ def test_repl_over_stdin() -> None:
     res = vex("repl", stdin="1 + 2\nlet x = 10;\nx * x\n")
     assert res.returncode == 0
     assert res.stdout == "3 : Int\n100 : Int\n"
+
+
+# ---------------------------------------------------------------- deep structures (need the big stack)
+def test_very_long_expression_chain_compiles_through_the_cli(tmp_path: pathlib.Path) -> None:
+    f = tmp_path / "chain.vx"
+    f.write_text("fn main() { print(" + " + ".join(["1"] * 3000) + "); }\n", encoding="utf-8")
+    res = vex("run", str(f))
+    assert res.returncode == 0, res.stderr
+    assert res.stdout == "3000\n"
+
+
+def test_printing_and_comparing_deeply_nested_values(tmp_path: pathlib.Path) -> None:
+    f = tmp_path / "deep.vx"
+    f.write_text(
+        "enum L { Nil, Cons(Int, L) }\n"
+        "fn build(n: Int) -> L {\n    let mut l = L.Nil;\n    for i in 0..n { l = L.Cons(i, l); }\n    l\n}\n"
+        'fn main() {\n    let big = build(300);\n    print(big == big);\n    print("{big}".len());\n}\n',
+        encoding="utf-8",
+    )
+    res = vex("run", str(f))
+    assert res.returncode == 0, res.stderr
+    expected_len = sum(len(f"Cons({i}, ") + 1 for i in range(300)) + len("Nil")
+    assert res.stdout == f"true\n{expected_len}\n"
+
+
+def test_disassembly_names_builtins_without_underscores() -> None:
+    res = vex("disasm", str(ROOT / "examples" / "hello.vx"))
+    assert "print/1" in res.stdout and "_print" not in res.stdout

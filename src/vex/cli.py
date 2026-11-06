@@ -6,6 +6,7 @@ import argparse
 import os
 import sys
 import threading
+from collections.abc import Callable
 
 from vex import __version__
 from vex.api import compile_file, read_source
@@ -28,11 +29,13 @@ def _configure_streams() -> None:
         reconf_in(encoding="utf-8")
 
 
-def _run_big_stack(fn: "object") -> int:
-    """Run ``fn`` on a thread with a large stack so deeply recursive values can be printed/compared."""
-    import typing
+def _run_big_stack(call: Callable[[], int]) -> int:
+    """Run ``call`` on a thread with a large stack.
 
-    call = typing.cast("typing.Callable[[], int]", fn)
+    Compiling a very long expression chain and printing/comparing deeply nested values recurse
+    in Python; a big stack and a high recursion limit keep that a Vex diagnostic or a result
+    instead of a crash.
+    """
     result: list[int] = []
     errors: list[BaseException] = []
 
@@ -44,10 +47,10 @@ def _run_big_stack(fn: "object") -> int:
 
     sys.setrecursionlimit(60_000)
     try:
-        threading.stack_size(256 * 1024 * 1024)
+        threading.stack_size(128 * 1024 * 1024)
     except (ValueError, RuntimeError):
         pass  # keep the platform default stack; only very deep structures are affected
-    t = threading.Thread(target=target)
+    t = threading.Thread(target=target, daemon=True)
     t.start()
     t.join()
     if errors:
@@ -69,20 +72,16 @@ def cmd_run(args: argparse.Namespace) -> int:
     if prog.warnings:
         print(render_all(prog.warnings), file=sys.stderr)
     assert prog.main is not None
-
-    def go() -> int:
-        vm = VM(args=args.args)
-        try:
-            result = vm.run_function(prog.main)  # type: ignore[arg-type]
-        except VexRuntimeError as e:
-            sys.stdout.flush()
-            print(e.render(), file=sys.stderr)
-            return EXIT_RUNTIME
-        except VexExit as e:
-            return e.code
-        return result if isinstance(result, int) and not isinstance(result, bool) else 0
-
-    return _run_big_stack(go)
+    vm = VM(args=args.args)
+    try:
+        result = vm.run_function(prog.main)
+    except VexRuntimeError as e:
+        sys.stdout.flush()
+        print(e.render(), file=sys.stderr)
+        return EXIT_RUNTIME
+    except VexExit as e:
+        return e.code
+    return result if isinstance(result, int) and not isinstance(result, bool) else 0
 
 
 def cmd_check(args: argparse.Namespace) -> int:
@@ -147,7 +146,7 @@ def main(argv: list[str] | None = None) -> int:
     _configure_streams()
     args = build_parser().parse_args(argv)
     try:
-        return int(args.fn(args))
+        return _run_big_stack(lambda: int(args.fn(args)))
     except KeyboardInterrupt:
         return 130
     except Exception as e:  # an internal bug: say so plainly instead of a bare traceback
