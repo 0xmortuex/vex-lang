@@ -154,8 +154,8 @@ x86-64 machine with CPython 3.13:
 
 | benchmark | Vex VM | same algorithm in CPython | slowdown |
 |-----------|-------:|--------------------------:|---------:|
-| `fib(27)` (recursive, ~630k calls) | 0.80 s | 0.018 s | ~44x |
-| 1M-iteration `while` loop + 600k nested `for` | 2.9 s | 0.08 s | ~35x |
+| `fib(27)` (recursive, ~630k calls) | 0.76 s | 0.018 s | ~43x |
+| 1M-iteration `while` loop + 600k nested `for` | 2.8 s | 0.08 s | ~35x |
 
 Cheap optimisations that are in: calls go straight to the callee's code object, integer ops are
 specialised by static type, local-vs-constant arithmetic and comparisons are fused, and hot
@@ -188,7 +188,7 @@ instructions are dispatched first. Anything more would be a different VM.
 
 ```text
 uv sync
-uv run pytest                 # about 1600 tests
+uv run pytest                 # about 1,800 tests
 uv run ruff check src tests
 uv run mypy --strict src tests
 uv run python benchmarks/run.py

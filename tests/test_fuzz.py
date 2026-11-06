@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import pathlib
 import random
+import re
 
 import pytest
 
@@ -198,3 +199,19 @@ fn main() {{
     even_sum = sum(x for x in mapped if py_mod(x, 2) == 0)
     expected = f"{even_sum}\n{sum(xs)}\n{sorted(xs)}\n{len(xs)}\n"
     assert out.getvalue() == expected
+
+
+IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z_0-9]*")
+
+
+@pytest.mark.parametrize("seed", range(200))
+def test_identifier_swaps_never_crash(seed: int) -> None:
+    """Swap identifiers between positions: mostly type errors, so this stresses the checker."""
+    rng = random.Random(50_000 + seed)
+    text = rng.choice(SEED_TEXTS)
+    names = IDENT_RE.findall(text)
+    for _ in range(rng.randint(1, 3)):
+        spans = [m.span() for m in IDENT_RE.finditer(text)]
+        a, b = rng.choice(spans)
+        text = text[:a] + rng.choice(names) + text[b:]
+    only_vex_diagnostics(text)
