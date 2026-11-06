@@ -524,7 +524,7 @@ class Checker:
     # ---- calls
     def infer_call(self, e: ast.Call, expected: Type | None) -> Type:
         callee = e.callee
-        if isinstance(callee, ast.Field) and callee.static is None:
+        if isinstance(callee, ast.Field) and callee.static is None and not callee.parenthesized:
             return self.infer_method_call(e, callee, expected)
         ct: Type
         target: object = None
@@ -811,7 +811,7 @@ class Checker:
         t = self.infer(st.init, st.annot)
         vt = t
         if st.annot is not None:
-            self.unify_at(st.annot, t, st.init.span, "the declared type of this `let`",
+            self.unify_at(st.annot, t, st.init.span, None,
                           secondary=[(st.ty_expr.span, "declared here")] if st.ty_expr else None)  # fmt: skip
             vt = st.annot
         self.check_pat(st.pat, vt)

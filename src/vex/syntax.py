@@ -175,6 +175,7 @@ class Field(Expr):
     # resolver: static path (Type.member / namespace.member); checker: struct field index
     static: object = None
     index: int = -1
+    parenthesized: bool = False  # `(x.f)(1)` calls a field value instead of a method
 
 
 @dataclass(eq=False)

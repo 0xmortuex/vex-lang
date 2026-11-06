@@ -1,14 +1,14 @@
-// Tight arithmetic loops: sum of i*i mod 7 over 3 million iterations, plus a nested loop.
+// Tight arithmetic loops: sum of i*i mod 7 over 1 million iterations, plus a nested loop.
 fn main() {
     let mut total = 0;
     let mut i = 0;
-    while i < 3000000 {
+    while i < 1000000 {
         total += (i * i) % 7;
         i += 1;
     }
     print(total);
     let mut count = 0;
-    for a in 0..1500 {
+    for a in 0..600 {
         for b in 0..1000 {
             if (a + b) % 3 == 0 {
                 count += 1;

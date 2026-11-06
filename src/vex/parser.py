@@ -650,6 +650,8 @@ class Parser:
             if not items:
                 return ast.UnitLit(self.span_from(t))
             if len(items) == 1 and not trailing:
+                if isinstance(items[0], ast.Field):
+                    items[0].parenthesized = True
                 return items[0]
             return ast.TupleLit(self.span_from(t), items)
         if k == "[":
