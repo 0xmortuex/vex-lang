@@ -1,0 +1,76 @@
+// Structs, impl blocks, Result and the `?` operator.
+struct Account {
+    owner: Str,
+    balance: Int,
+    history: List[Str],
+}
+
+enum BankError {
+    Insufficient(Int, Int),
+    InvalidAmount(Int),
+}
+
+fn describe(e: BankError) -> Str {
+    match e {
+        BankError.Insufficient(have, want) => "insufficient funds: have {have}, need {want}",
+        BankError.InvalidAmount(n) => "invalid amount: {n}",
+    }
+}
+
+impl Account {
+    fn open(owner: Str, initial: Int) -> Account {
+        Account { owner: owner, balance: initial, history: ["opened with {initial}"] }
+    }
+
+    fn deposit(mut self, amount: Int) -> Result[Int, BankError] {
+        if amount <= 0 {
+            return Err(BankError.InvalidAmount(amount));
+        }
+        self.balance += amount;
+        self.history.push("deposit {amount}");
+        Ok(self.balance)
+    }
+
+    fn withdraw(mut self, amount: Int) -> Result[Int, BankError] {
+        if amount <= 0 {
+            return Err(BankError.InvalidAmount(amount));
+        }
+        if amount > self.balance {
+            return Err(BankError.Insufficient(self.balance, amount));
+        }
+        self.balance -= amount;
+        self.history.push("withdraw {amount}");
+        Ok(self.balance)
+    }
+
+    fn summary(self) -> Str {
+        "{self.owner}: {self.balance}"
+    }
+}
+
+fn transfer(mut from: Account, mut to: Account, amount: Int) -> Result[Unit, BankError] {
+    // `?` returns early with the Err; the Ok value is unwrapped.
+    let _ = from.withdraw(amount)?;
+    let _ = to.deposit(amount)?;
+    Ok(())
+}
+
+fn report(r: Result[Unit, BankError]) {
+    match r {
+        Ok(_) => print("transfer ok"),
+        Err(e) => print("transfer failed: {describe(e)}"),
+    }
+}
+
+fn main() {
+    let mut alice = Account.open("alice", 100);
+    let mut bob = Account.open("bob", 20);
+    report(transfer(alice, bob, 30));
+    report(transfer(alice, bob, 500));
+    report(transfer(bob, alice, -5));
+    print(alice.summary());
+    print(bob.summary());
+    for line in alice.history {
+        print("  alice: {line}");
+    }
+}

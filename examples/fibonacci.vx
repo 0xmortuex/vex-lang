@@ -1,0 +1,32 @@
+// Three ways to compute Fibonacci numbers: recursion, a loop, and fold.
+// Note that `fib` has no declared return type: it is inferred as Int.
+fn fib(n: Int) {
+    if n < 2 { n } else { fib(n - 1) + fib(n - 2) }
+}
+
+fn fib_loop(n: Int) -> Int {
+    let mut a = 0;
+    let mut b = 1;
+    let mut i = 0;
+    while i < n {
+        let next = a + b;
+        a = b;
+        b = next;
+        i += 1;
+    }
+    a
+}
+
+fn fib_fold(n: Int) -> Int {
+    let pair = (0..n).to_list().fold((0, 1), |acc, _| (acc.1, acc.0 + acc.1));
+    pair.0
+}
+
+fn main() {
+    let first = (0..15).to_list().map(|i| fib(i));
+    print("first 15: {first}");
+    print("fib(20) = {fib(20)}");
+    print("loop(50) = {fib_loop(50)}");
+    print("fold(50) = {fib_fold(50)}");
+    print("loop(90) = {fib_loop(90)}");
+}

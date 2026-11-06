@@ -1,0 +1,14 @@
+// Hello, Vex.
+fn greet(name: Str) -> Str {
+    "Hello, {name}!"
+}
+
+fn main() {
+    print(greet("world"));
+    print(greet("Dünya ğüşiöç 🌍"));
+    let mut total = 0;
+    for i in 1..=10 {
+        total += i;
+    }
+    print("sum = {total}");
+}

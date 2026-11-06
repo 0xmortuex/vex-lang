@@ -1,0 +1,65 @@
+// A generic struct with methods, and a bounded generic function.
+struct Stack[T] {
+    items: List[T],
+}
+
+impl[T] Stack[T] {
+    fn new() -> Stack[T] {
+        Stack { items: [] }
+    }
+
+    fn push(mut self, x: T) {
+        self.items.push(x);
+    }
+
+    fn pop(mut self) -> Option[T] {
+        self.items.pop()
+    }
+
+    fn peek(self) -> Option[T] {
+        self.items.last()
+    }
+
+    fn size(self) -> Int {
+        self.items.len()
+    }
+
+    fn is_empty(self) -> Bool {
+        self.items.is_empty()
+    }
+}
+
+fn largest[T: Ord](xs: List[T]) -> Option[T] {
+    if xs.is_empty() {
+        return None;
+    }
+    let mut best = xs[0];
+    for x in xs {
+        if x > best {
+            best = x;
+        }
+    }
+    Some(best)
+}
+
+fn main() {
+    let mut s: Stack[Int] = Stack.new();
+    s.push(10);
+    s.push(20);
+    s.push(30);
+    print("size = {s.size()}, peek = {s.peek()}");
+    while !s.is_empty() {
+        match s.pop() {
+            Some(x) => print("popped {x}"),
+            None => print("empty"),
+        }
+    }
+    let mut words = Stack.new();
+    words.push("alpha");
+    words.push("beta");
+    print("words: {words.items}");
+    print("largest int: {largest([3, 9, 2])}");
+    print("largest str: {largest(["pear", "apple", "zebra"])}");
+    let nothing: List[Float] = [];
+    print("largest of nothing: {largest(nothing)}");
+}

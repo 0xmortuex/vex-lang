@@ -1,0 +1,87 @@
+// Tic-tac-toe: minimax self-play from a fixed opening.
+fn lines() -> List[(Int, Int, Int)] {
+    [(0, 1, 2), (3, 4, 5), (6, 7, 8), (0, 3, 6), (1, 4, 7), (2, 5, 8), (0, 4, 8), (2, 4, 6)]
+}
+
+fn winner(b: List[Str]) -> Str {
+    for l in lines() {
+        let (x, y, z) = l;
+        if b[x] != " " && b[x] == b[y] && b[y] == b[z] {
+            return b[x];
+        }
+    }
+    " "
+}
+
+fn full(b: List[Str]) -> Bool {
+    !b.contains(" ")
+}
+
+fn other(p: Str) -> Str {
+    if p == "X" { "O" } else { "X" }
+}
+
+// Score from X's point of view: +1 X wins, -1 O wins, 0 draw.
+fn minimax(b: List[Str], player: Str) -> Int {
+    let w = winner(b);
+    if w == "X" { return 1; }
+    if w == "O" { return -1; }
+    if full(b) { return 0; }
+    let mut best = if player == "X" { -2 } else { 2 };
+    for i in 0..9 {
+        if b[i] == " " {
+            let mut next = b.copy();
+            next[i] = player;
+            let score = minimax(next, other(player));
+            if player == "X" {
+                best = best.max(score);
+            } else {
+                best = best.min(score);
+            }
+        }
+    }
+    best
+}
+
+fn best_move(b: List[Str], player: Str) -> Int {
+    let mut best_i = -1;
+    let mut best_score = if player == "X" { -2 } else { 2 };
+    for i in 0..9 {
+        if b[i] == " " {
+            let mut next = b.copy();
+            next[i] = player;
+            let score = minimax(next, other(player));
+            if (player == "X" && score > best_score) || (player == "O" && score < best_score) {
+                best_score = score;
+                best_i = i;
+            }
+        }
+    }
+    best_i
+}
+
+fn show_board(b: List[Str]) {
+    for r in 0..3 {
+        print(" {b[r * 3]} | {b[r * 3 + 1]} | {b[r * 3 + 2]}");
+        if r < 2 { print("---+---+---"); }
+    }
+}
+
+fn main() {
+    let mut board = [" ", " ", " ", " ", " ", " ", " ", " ", " "];
+    board[0] = "X";
+    board[4] = "O";
+    let mut player = "X";
+    while winner(board) == " " && !full(board) {
+        let m = best_move(board, player);
+        board[m] = player;
+        player = other(player);
+    }
+    show_board(board);
+    let w = winner(board);
+    if w == " " {
+        print("draw (as perfect play always is)");
+    } else {
+        print("{w} wins");
+    }
+}

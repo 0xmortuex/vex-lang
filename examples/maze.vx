@@ -1,0 +1,75 @@
+// Breadth-first search through an ASCII maze, using a Map for parent links.
+fn find(grid: List[List[Str]], target: Str) -> Option[(Int, Int)] {
+    for r in 0..grid.len() {
+        for c in 0..grid[r].len() {
+            if grid[r][c] == target {
+                return Some((r, c));
+            }
+        }
+    }
+    None
+}
+
+fn neighbors(grid: List[List[Str]], pos: (Int, Int)) -> List[(Int, Int)] {
+    let (r, c) = pos;
+    let candidates = [(r - 1, c), (r + 1, c), (r, c - 1), (r, c + 1)];
+    candidates.filter(|p| {
+        p.0 >= 0 && p.0 < grid.len() && p.1 >= 0 && p.1 < grid[0].len() && grid[p.0][p.1] != "#"
+    })
+}
+
+fn solve(grid: List[List[Str]]) -> Option[List[(Int, Int)]] {
+    let start = find(grid, "S")?;
+    let goal = find(grid, "G")?;
+    let mut parents: Map[(Int, Int), (Int, Int)] = #{};
+    let mut seen: Map[(Int, Int), Bool] = #{ start: true };
+    let mut queue = [start];
+    let mut head = 0;
+    while head < queue.len() {
+        let cur = queue[head];
+        head += 1;
+        if cur == goal {
+            let mut path = [cur];
+            let mut at = cur;
+            while at != start {
+                at = parents[at];
+                path.push(at);
+            }
+            path.reverse();
+            return Some(path);
+        }
+        for nb in neighbors(grid, cur) {
+            if !seen.contains_key(nb) {
+                seen.insert(nb, true);
+                parents.insert(nb, cur);
+                queue.push(nb);
+            }
+        }
+    }
+    None
+}
+
+fn main() {
+    let rows = [
+        "S.#.......",
+        ".##.#####.",
+        "....#...#.",
+        ".####.#.#.",
+        "......#..G",
+    ];
+    let mut grid = rows.map(|row| row.chars());
+    match solve(grid) {
+        Some(path) => {
+            print("shortest path: {path.len() - 1} steps");
+            for p in path {
+                if grid[p.0][p.1] == "." {
+                    grid[p.0][p.1] = "*";
+                }
+            }
+            for row in grid {
+                print(row.join(""));
+            }
+        },
+        None => print("no path"),
+    }
+}

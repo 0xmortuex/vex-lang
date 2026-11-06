@@ -1,0 +1,64 @@
+// A singly linked list built from a generic recursive enum.
+enum List2[T] {
+    Nil,
+    Cons(T, List2[T]),
+}
+
+fn prepend[T](xs: List2[T], x: T) -> List2[T] {
+    List2.Cons(x, xs)
+}
+
+fn length[T](xs: List2[T]) -> Int {
+    match xs {
+        List2.Nil => 0,
+        List2.Cons(_, rest) => 1 + length(rest),
+    }
+}
+
+fn sum(xs: List2[Int]) -> Int {
+    match xs {
+        Nil => 0,
+        Cons(head, rest) => head + sum(rest),
+    }
+}
+
+fn map_list[T, U](xs: List2[T], f: fn(T) -> U) -> List2[U] {
+    match xs {
+        Nil => List2.Nil,
+        Cons(head, rest) => List2.Cons(f(head), map_list(rest, f)),
+    }
+}
+
+fn to_str(xs: List2[Int]) -> Str {
+    match xs {
+        Nil => "nil",
+        Cons(head, rest) => "{head} -> {to_str(rest)}",
+    }
+}
+
+fn reverse[T](xs: List2[T]) -> List2[T] {
+    let mut out = List2.Nil;
+    let mut cur = xs;
+    let mut going = true;
+    while going {
+        match cur {
+            Nil => { going = false; },
+            Cons(head, rest) => {
+                out = List2.Cons(head, out);
+                cur = rest;
+            },
+        }
+    }
+    out
+}
+
+fn main() {
+    let mut list = List2.Nil;
+    for i in 1..=5 {
+        list = prepend(list, i * i);
+    }
+    print(to_str(list));
+    print("length = {length(list)}, sum = {sum(list)}");
+    print(to_str(map_list(list, |x| x + 100)));
+    print(to_str(reverse(list)));
+}
