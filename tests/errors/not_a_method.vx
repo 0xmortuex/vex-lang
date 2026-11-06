@@ -1,0 +1,9 @@
+// expect: not-a-method 8:7
+struct S {}
+impl S {
+    fn make() -> S { S {} }
+}
+fn main() {
+    let s = S {};
+    s.make();
+}

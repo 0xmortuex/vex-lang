@@ -1,0 +1,7 @@
+// expect: type-mismatch 4:9
+fn main() {
+    match 1 {
+        "a" => 1,
+        _ => 2,
+    };
+}

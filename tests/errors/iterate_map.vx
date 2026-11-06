@@ -1,0 +1,5 @@
+// expect: not-iterable 4:14 | entries
+fn main() {
+    let m = #{1: 2};
+    for x in m { }
+}

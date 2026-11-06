@@ -1,0 +1,3 @@
+// expect: unknown-type 2:9
+fn f(x: Integer) {}
+fn main() {}

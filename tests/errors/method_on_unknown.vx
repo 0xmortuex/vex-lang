@@ -1,0 +1,4 @@
+// expect: cannot-infer 3:19
+fn main() {
+    let f = |x| x.len();
+}

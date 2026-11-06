@@ -1,0 +1,3 @@
+// expect: import-not-found 2:1
+import nothing_here;
+fn main() {}

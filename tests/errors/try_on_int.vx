@@ -1,0 +1,6 @@
+// expect: bad-try 3:13
+fn f() -> Option[Int] {
+    let x = 1?;
+    Some(x)
+}
+fn main() {}

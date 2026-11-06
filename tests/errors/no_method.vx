@@ -1,0 +1,5 @@
+// expect: no-method 4:8 | did you mean `len`
+fn main() {
+    let xs = [1];
+    xs.lenght();
+}

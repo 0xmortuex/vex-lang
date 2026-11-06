@@ -1,0 +1,4 @@
+// expect: type-mismatch 3:8 | must be Bool
+fn main() {
+    if 1 { }
+}

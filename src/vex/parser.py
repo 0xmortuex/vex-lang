@@ -11,8 +11,8 @@ INT_MIN = -(2**63)
 
 BINARY_PREC = {
     "||": 1, "&&": 2,
-    "==": 3, "!=": 3, "<": 3, "<=": 3, ">": 3, ">=": 3,
-    "+": 4, "-": 4, "*": 5, "/": 5, "%": 5,
+    "==": 3, "!=": 3, "<": 4, "<=": 4, ">": 4, ">=": 4,
+    "+": 5, "-": 5, "*": 6, "/": 6, "%": 6,
 }  # fmt: skip
 ASSIGN_OPS = {"=", "+=", "-=", "*=", "/=", "%="}
 ITEM_KEYWORDS = {"fn", "struct", "enum", "impl", "import"}
@@ -110,6 +110,7 @@ class Parser:
                 except ParseError:
                     self.advance()
                     continue
+            before = self.pos
             try:
                 if repl and self._starts_statement():
                     self._repl_statement(mod)
@@ -117,6 +118,8 @@ class Parser:
                     mod.items.append(self.parse_item())
             except ParseError:
                 self._sync_item()
+                if self.pos == before:
+                    self.advance()  # always make progress
             if len(self.sink.items) > self.sink.MAX_ERRORS:
                 break
         return mod
@@ -208,8 +211,8 @@ class Parser:
                 pt = self.ident("a parameter name")
                 if not self.at(":"):
                     raise self.fail("missing-param-type",
-                                    f"parameter `{pt.text}` needs a type annotation",
-                                    label="expected `: Type` here",
+                                    f"parameter `{pt.text}` needs a type annotation", pt,
+                                    label="expected `: Type` after this name",
                                     help=f"write `{pt.text}: Int` (parameter types are never inferred)")  # fmt: skip
                 self.advance()
                 params.append(ast.Param(self.span_of(pt), pt.text, self.parse_type(), is_mut))
@@ -341,10 +344,13 @@ class Parser:
                     raise ParseError()
                 if self.eat(";"):
                     continue
+                before = self.pos
                 try:
                     st = self.parse_stmt_or_tail()
                 except ParseError:
                     self._sync_stmt()
+                    if self.pos == before:
+                        self.advance()  # always make progress
                     continue
                 if isinstance(st, ast.Expr):
                     if self.at("}"):
@@ -381,8 +387,13 @@ class Parser:
         if self.at("let"):
             return self.parse_let()
         if self.at("fn") or self.at("struct") or self.at("enum") or self.at("impl"):
-            raise self.fail("nested-item", f"`{self.tok.text}` declarations are only allowed at the top level",
+            err = self.fail("nested-item", f"`{self.tok.text}` declarations are only allowed at the top level",
                             label="move this out of the function body")  # fmt: skip
+            try:
+                self.parse_item()  # consume the whole declaration so recovery does not cascade
+            except ParseError:
+                pass
+            raise err
         start = self.tok
         if self.tok.kind in BLOCK_LIKE:
             e = self.parse_block_like()
@@ -391,8 +402,8 @@ class Parser:
                 return ast.ExprStmt(self.span_from(start), e)
             if self.at("}") or self.at("EOF"):
                 return e
-            if self.tok.kind in ASSIGN_OPS or self.tok.kind in BINARY_PREC or self.tok.kind in (".", "?", "("):
-                # `if x {..} else {..} + 1` style continuation: treat the block as the left operand.
+            if self.tok.kind in (".", "?"):
+                # `match x { .. }.method()` continues the expression; operators do not (as in Rust).
                 e = self._continue_expr(e)
                 return self._finish_expr_stmt(start, e)
             return ast.ExprStmt(self.span_from(start), e)
@@ -469,6 +480,10 @@ class Parser:
 
     def parse_unary(self) -> ast.Expr:
         t = self.tok
+        if t.kind == "-" and self.peek().kind == "INT" and self.peek().value == INT_MAX + 1:
+            self.advance()
+            self.advance()
+            return ast.IntLit(self.span_from(t), INT_MIN)
         if t.kind in ("-", "!"):
             self.depth += 1
             try:
@@ -478,8 +493,6 @@ class Parser:
                 operand = self.parse_unary()
             finally:
                 self.depth -= 1
-            if t.kind == "-" and isinstance(operand, ast.IntLit) and operand.value == INT_MAX + 1:
-                return ast.IntLit(self.span_from(t), INT_MIN)
             return ast.Unary(self.span_from(t), t.kind, operand)
         return self.parse_postfix()
 
@@ -595,7 +608,7 @@ class Parser:
         if k == "INT":
             self.advance()
             assert isinstance(t.value, int)
-            if t.value > INT_MAX + 1:
+            if t.value > INT_MAX:
                 self.sink.error("int-literal-range", f"integer literal `{t.text}` is out of range",
                                 self.span_of(t), "does not fit in a 64-bit Int",
                                 help=f"Int is a signed 64-bit integer ({INT_MIN} to {INT_MAX})")  # fmt: skip
@@ -799,7 +812,7 @@ class Parser:
                 self.advance()
                 args: list[ast.Pat] = []
                 while not self.at(")"):
-                    args.append(self.parse_pattern())
+                    args.append(self.parse_pattern(allow_mut))
                     if not self.eat(","):
                         break
                 self.expect(")", ctx=" in pattern")
@@ -814,7 +827,7 @@ class Parser:
                         break
                     ft = self.ident("a field name")
                     if self.eat(":"):
-                        fields.append((ft.text, self.parse_pattern()))
+                        fields.append((ft.text, self.parse_pattern(allow_mut)))
                     else:
                         fields.append((ft.text, ast.PBind(self.span_of(ft), ft.text, False)))
                     if not self.eat(","):
@@ -829,7 +842,7 @@ class Parser:
             items: list[ast.Pat] = []
             trailing = False
             while not self.at(")"):
-                items.append(self.parse_pattern())
+                items.append(self.parse_pattern(allow_mut))
                 trailing = False
                 if not self.eat(","):
                     break
@@ -848,6 +861,10 @@ class Parser:
             if not isinstance(e, ast.StrLit):
                 raise self.fail("bad-pattern", "string patterns cannot contain `{}` interpolation", t)
             return ast.PLit(self.span_of(t), e)
+        if k in ast_keywords():
+            self.advance()
+            raise self.fail("keyword-as-name", f"expected a name, found keyword `{t.text}`", t,
+                            f"`{t.text}` is a reserved word", f"pick another name, e.g. `{t.text}_`")
         raise self.fail("expected-pattern", f"expected a pattern, found {self.describe(t)}",
                         label="expected a pattern")  # fmt: skip
 

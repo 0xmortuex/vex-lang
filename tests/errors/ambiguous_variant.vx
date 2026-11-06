@@ -1,0 +1,6 @@
+// expect: ambiguous-name 5:13 | A.X
+enum A { X }
+enum B { X }
+fn main() {
+    let v = X;
+}

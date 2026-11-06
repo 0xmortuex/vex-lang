@@ -1,0 +1,5 @@
+// expect: expected-token 4:5 | expected `;`
+fn main() {
+    let x = 5
+    let y = 6;
+}

@@ -1,0 +1,6 @@
+// expect: expected-token 4:11
+fn main() {
+    match 1 {
+        1 2,
+    }
+}

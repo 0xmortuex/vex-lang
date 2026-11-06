@@ -1,0 +1,7 @@
+// expect: type-mismatch 4:14
+fn main() {
+    match 1 {
+        x if x => 1,
+        _ => 2,
+    };
+}

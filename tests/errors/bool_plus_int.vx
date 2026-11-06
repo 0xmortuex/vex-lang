@@ -1,0 +1,4 @@
+// expect: type-mismatch 3:13
+fn main() {
+    let x = true + 1;
+}

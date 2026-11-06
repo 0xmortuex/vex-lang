@@ -1,0 +1,5 @@
+// expect: type-mismatch 4:13
+fn main() {
+    let mut xs = [1];
+    xs.push("a");
+}

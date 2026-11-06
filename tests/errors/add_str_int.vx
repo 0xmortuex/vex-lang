@@ -1,0 +1,4 @@
+// expect: type-mismatch 3:13 | interpolation
+fn main() {
+    let x = "a" + 1;
+}

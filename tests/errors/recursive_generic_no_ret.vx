@@ -1,0 +1,5 @@
+// expect: recursive-inference 3:5
+fn f[T](x: T) {
+    f(x)
+}
+fn main() {}

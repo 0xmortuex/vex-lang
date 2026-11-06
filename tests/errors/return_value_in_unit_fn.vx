@@ -1,0 +1,5 @@
+// expect: type-mismatch 3:12
+fn f() -> Unit {
+    return 1;
+}
+fn main() {}

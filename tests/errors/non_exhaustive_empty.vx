@@ -1,0 +1,5 @@
+// expect: non-exhaustive-match 3:11
+fn main() {
+    match 1 {
+    };
+}

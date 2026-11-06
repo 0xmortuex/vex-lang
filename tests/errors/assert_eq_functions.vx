@@ -1,0 +1,5 @@
+// expect: unsatisfied-bound 4:5
+fn f() {}
+fn main() {
+    assert_eq(f, f);
+}

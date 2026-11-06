@@ -1,0 +1,3 @@
+// expect: bad-map-key 2:9
+fn f(m: Map[List[Int], Int]) {}
+fn main() {}

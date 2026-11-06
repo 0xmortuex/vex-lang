@@ -1,0 +1,4 @@
+// expect: unknown-type 3:9 | did you mean `Point`
+struct Point { x: Int }
+fn f(p: Pont) {}
+fn main() {}

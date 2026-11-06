@@ -1,0 +1,2 @@
+// expect: bad-main 2:4
+fn main(x: Int) {}

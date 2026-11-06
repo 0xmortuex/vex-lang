@@ -60,7 +60,8 @@ def _enum_family(info: EnumInfo) -> Family:
     if fam is None:
         fam = Family()
         for v in info.variants:
-            fam.ctors.append(Ctor(("v", info.name, v.tag), len(v.fields), f"{info.name}.{v.name}", "variant", fam))
+            shown = v.name if info.span is None else f"{info.name}.{v.name}"
+            fam.ctors.append(Ctor(("v", info.name, v.tag), len(v.fields), shown, "variant", fam))
         _enum_families[id(info)] = fam
     return fam
 

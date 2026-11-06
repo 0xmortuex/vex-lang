@@ -1,0 +1,4 @@
+// expect: arity-mismatch 3:22
+fn main() {
+    let xs = [1].map(|a, b| a);
+}

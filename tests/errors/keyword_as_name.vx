@@ -1,0 +1,4 @@
+// expect: keyword-as-name 3:9
+fn main() {
+    let fn = 1;
+}

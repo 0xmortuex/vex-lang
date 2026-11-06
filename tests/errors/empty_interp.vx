@@ -1,0 +1,4 @@
+// expect: empty-interpolation 3:13
+fn main() {
+    print("a{}b");
+}

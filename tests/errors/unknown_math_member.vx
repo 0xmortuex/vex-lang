@@ -1,0 +1,4 @@
+// expect: unknown-member 3:16 | did you mean `sqrt`
+fn main() {
+    print(math.sqr(2.0));
+}

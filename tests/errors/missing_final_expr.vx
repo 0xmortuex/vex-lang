@@ -1,0 +1,6 @@
+// expect: type-mismatch 5:1 | remove the trailing `;`
+fn f() -> Int {
+    let x = 1;
+    x + 1;
+}
+fn main() {}

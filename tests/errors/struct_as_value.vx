@@ -1,0 +1,5 @@
+// expect: not-a-value 4:13
+struct P { x: Int }
+fn main() {
+    let p = P;
+}

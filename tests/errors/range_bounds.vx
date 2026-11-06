@@ -1,0 +1,4 @@
+// expect: type-mismatch 3:17
+fn main() {
+    for i in 0..2.5 { }
+}

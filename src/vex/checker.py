@@ -101,6 +101,13 @@ def satisfies(t: Type, bound: str) -> bool:
     return True
 
 
+def value_span(e: ast.Expr) -> Span:
+    """The span that best locates the value an expression produces (the tail of blocks)."""
+    while isinstance(e, ast.Block) and e.tail is not None:
+        e = e.tail
+    return e.span
+
+
 def hint_for(expected: Type, actual: Type) -> str | None:
     e, a = prune(expected), prune(actual)
     if _is(e, "Float") and _is(a, "Int"):
@@ -211,7 +218,7 @@ class Checker:
         for d in self.deferred:
             self.check_deferred(d)
         reported = False
-        for e in self.exprs:
+        for e in sorted(self.exprs, key=lambda x: (x.span.start, -x.span.end)):
             if e.ty is None:
                 continue
             z = zonk(e.ty)
@@ -566,7 +573,7 @@ class Checker:
         if isinstance(target, FnSym) and any(target.mut_params):
             for i, a in enumerate(args):
                 if target.mut_params[i + skip] and self.is_aggregate(params[i]):
-                    self.require_mutable(a, a.span, f"pass an immutable value to the `mut` parameter of `{name}` using")
+                    self.require_mutable(a, a.span, "pass", f" to the `mut` parameter of `{name}`")
         return ct.ret
 
     def infer_method_call(self, e: ast.Call, callee: ast.Field, expected: Type | None) -> Type:
@@ -614,7 +621,7 @@ class Checker:
                 self.infer(a)
             return ERROR
         if mutating:
-            self.require_mutable(recv, span, f"call `{name}`, which modifies its receiver,")
+            self.require_mutable(recv, span, f"call `{name}` on")
         return self.apply(e, fty, e.args, name, 1, expected)
 
     def find_method(self, t: Type, name: str) -> tuple[FnSym | Builtin, bool] | None:
@@ -822,7 +829,7 @@ class Checker:
                              f"this branch has type `{show(tt)}`", help="add an `else` branch that produces a value of the same type")  # fmt: skip
             return UNIT
         et = self.infer(e.els, expected)
-        return self.join(tt, et, e.els.span, "`if` and `else` branches")
+        return self.join(tt, et, value_span(e.els), "`if` and `else` branches")
 
     def infer_match(self, e: ast.Match, expected: Type | None) -> Type:
         st = self.infer(e.scrut)
@@ -832,7 +839,7 @@ class Checker:
             if arm.guard is not None:
                 self.expect(arm.guard, BOOL, note="match guards must be Bool")
             bt = self.infer(arm.body, expected if acc is None else acc)
-            acc = self.join(acc, bt, arm.body.span, "match arms")
+            acc = self.join(acc, bt, value_span(arm.body), "match arms")
         covered = [to_spat(a.pat) for a in e.arms if a.guard is None]
         w = missing_pattern(covered)
         if w is not None:
@@ -909,7 +916,7 @@ class Checker:
             e = e.obj
         return e
 
-    def require_mutable(self, target: ast.Expr, span: Span, action: str) -> None:
+    def require_mutable(self, target: ast.Expr, span: Span, verb: str, detail: str = "") -> None:
         root = self.root_of(target)
         if isinstance(root, ast.Name):
             sym = root.sym
@@ -921,7 +928,7 @@ class Checker:
                     help = "function parameters are immutable"
                 else:
                     help = f"declare it with `let mut {sym.name}`"
-                self.err("immutable-binding", f"cannot {action} {what}: it is not declared `mut`", span,
+                self.err("immutable-binding", f"cannot {verb} {what}{detail}: it is not declared `mut`", span,
                          f"{what} is immutable", help=help,
                          secondary=[(sym.span, "declared here")] if isinstance(sym, LocalSym) else None)  # fmt: skip
 

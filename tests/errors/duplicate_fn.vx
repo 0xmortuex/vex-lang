@@ -1,0 +1,4 @@
+// expect: duplicate-definition 3:4
+fn f() {}
+fn f() {}
+fn main() {}

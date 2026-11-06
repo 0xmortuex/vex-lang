@@ -1,0 +1,5 @@
+// expect: no-field 4:13
+fn main() {
+    let t = (1, 2);
+    print(t.5);
+}

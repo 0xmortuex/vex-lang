@@ -1,0 +1,5 @@
+// expect: not-indexable 4:11
+fn main() {
+    let n = 5;
+    print(n[0]);
+}

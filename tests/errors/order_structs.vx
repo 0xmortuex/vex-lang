@@ -1,0 +1,5 @@
+// expect: bad-operand 4:13
+struct P { x: Int }
+fn main() {
+    let x = P { x: 1 } < P { x: 2 };
+}

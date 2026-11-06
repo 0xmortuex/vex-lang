@@ -1,0 +1,5 @@
+// expect: duplicate-field 4:23
+struct P { x: Int }
+fn main() {
+    let p = P { x: 1, x: 2 };
+}

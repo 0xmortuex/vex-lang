@@ -218,6 +218,30 @@ class VM:
                     if r > INT_MAX or r < INT_MIN:
                         raise VexPanic("integer overflow in `*`")
                     stack[-1] = r
+                elif op == MOD_I:
+                    b = pop()
+                    a = stack[-1]
+                    if b > 0 and a >= 0:
+                        stack[-1] = a % b
+                    elif b == 0:
+                        raise VexPanic("division by zero in `%`")
+                    else:
+                        r = abs(a) % abs(b)
+                        stack[-1] = -r if a < 0 else r
+                elif op == DIV_I:
+                    b = pop()
+                    a = stack[-1]
+                    if b > 0 and a >= 0:
+                        stack[-1] = a // b
+                    elif b == 0:
+                        raise VexPanic("division by zero")
+                    else:
+                        q = abs(a) // abs(b)
+                        if (a < 0) != (b < 0):
+                            q = -q
+                        if q > INT_MAX:
+                            raise VexPanic("integer overflow in `/`")
+                        stack[-1] = q
                 elif op == EQ:
                     b = pop()
                     stack[-1] = stack[-1] == b
@@ -351,24 +375,6 @@ class VM:
                     stack[-1] = math.fmod(stack[-1], b)
                 elif op == NEG_F:
                     stack[-1] = -stack[-1]
-                elif op == DIV_I:
-                    b = pop()
-                    a = stack[-1]
-                    if b == 0:
-                        raise VexPanic("division by zero")
-                    q = abs(a) // abs(b)
-                    if (a < 0) != (b < 0):
-                        q = -q
-                    if q > INT_MAX:
-                        raise VexPanic("integer overflow in `/`")
-                    stack[-1] = q
-                elif op == MOD_I:
-                    b = pop()
-                    a = stack[-1]
-                    if b == 0:
-                        raise VexPanic("division by zero in `%`")
-                    r = abs(a) % abs(b)
-                    stack[-1] = -r if a < 0 else r
                 elif op == NEG_I:
                     r = -stack[-1]
                     if r > INT_MAX:

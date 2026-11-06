@@ -1,0 +1,5 @@
+// expect: immutable-binding 4:8
+fn main() {
+    let xs = [1];
+    xs.push(2);
+}

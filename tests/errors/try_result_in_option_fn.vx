@@ -1,0 +1,7 @@
+// expect: bad-try 4:13
+fn g() -> Result[Int, Str] { Ok(1) }
+fn f() -> Option[Int] {
+    let x = g()?;
+    Some(x)
+}
+fn main() {}

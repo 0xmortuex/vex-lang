@@ -1,0 +1,6 @@
+// expect: expected-pattern 4:9
+fn main() {
+    match 1 {
+        + => 1,
+    }
+}

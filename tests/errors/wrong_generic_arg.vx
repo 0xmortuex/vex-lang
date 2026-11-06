@@ -1,0 +1,4 @@
+// expect: type-mismatch 3:26
+fn main() {
+    let xs: List[Int] = ["a"];
+}

@@ -1,0 +1,4 @@
+// expect: expected-expression 3:13
+fn main() {
+    let x = ;
+}

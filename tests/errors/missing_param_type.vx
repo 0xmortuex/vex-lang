@@ -1,0 +1,3 @@
+// expect: missing-param-type 2:6 | needs a type annotation
+fn f(x) {}
+fn main() {}

@@ -1,0 +1,4 @@
+// expect: unknown-type 3:13
+fn main() {
+    let p = Pt { x: 1 };
+}

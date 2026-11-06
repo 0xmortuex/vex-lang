@@ -1,0 +1,6 @@
+// expect: mut-fn-value 5:13
+struct C { n: Int }
+fn bump(mut c: C) { c.n += 1; }
+fn main() {
+    let f = bump;
+}

@@ -1,0 +1,6 @@
+// expect: immutable-binding 5:5
+struct P { x: Int }
+fn main() {
+    let p = P { x: 1 };
+    p.x = 2;
+}

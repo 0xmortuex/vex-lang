@@ -1,0 +1,6 @@
+// expect: bad-operand 5:13
+fn f() {}
+fn g() {}
+fn main() {
+    let x = f == g;
+}

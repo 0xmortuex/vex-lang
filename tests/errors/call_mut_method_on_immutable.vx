@@ -1,0 +1,9 @@
+// expect: immutable-binding 8:7
+struct C { n: Int }
+impl C {
+    fn bump(mut self) { self.n += 1; }
+}
+fn main() {
+    let c = C { n: 0 };
+    c.bump();
+}

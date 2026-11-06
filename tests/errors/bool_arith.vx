@@ -1,0 +1,4 @@
+// expect: bad-operand 3:13
+fn main() {
+    let x = true - false;
+}

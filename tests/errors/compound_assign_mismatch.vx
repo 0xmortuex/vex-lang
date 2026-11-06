@@ -1,0 +1,5 @@
+// expect: type-mismatch 4:5
+fn main() {
+    let mut x = 1;
+    x += "a";
+}

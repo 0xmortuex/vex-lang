@@ -1,0 +1,3 @@
+// expect: expected-item 2:1 | inside `fn main
+let x = 1;
+fn main() {}

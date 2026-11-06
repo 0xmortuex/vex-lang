@@ -1,0 +1,4 @@
+// expect: refutable-pattern 3:9 | None
+fn main() {
+    let Some(x) = Some(1);
+}

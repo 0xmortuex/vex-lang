@@ -1,0 +1,3 @@
+// expect: self-outside-impl 2:4
+fn f(self) {}
+fn main() {}

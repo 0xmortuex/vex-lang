@@ -1,0 +1,6 @@
+// expect: bad-try 3:13
+fn f() -> Int {
+    let x = Some(1)?;
+    x
+}
+fn main() {}

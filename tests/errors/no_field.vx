@@ -1,0 +1,6 @@
+// expect: no-field 5:13
+struct P { x: Int }
+fn main() {
+    let p = P { x: 1 };
+    print(p.y);
+}

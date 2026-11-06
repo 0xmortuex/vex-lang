@@ -1,0 +1,9 @@
+// expect: no-field 8:7
+struct S {}
+impl S {
+    fn go(self) {}
+}
+fn main() {
+    let s = S {};
+    s.go;
+}

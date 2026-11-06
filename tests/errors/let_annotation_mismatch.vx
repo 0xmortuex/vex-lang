@@ -1,0 +1,4 @@
+// expect: type-mismatch 3:18 | expected `Int`, found `Str`
+fn main() {
+    let x: Int = "hi";
+}

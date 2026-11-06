@@ -1,0 +1,4 @@
+// expect: type-mismatch 3:18
+fn main() {
+    let xs = [1, "a"];
+}

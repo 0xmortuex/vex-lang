@@ -1,0 +1,7 @@
+// expect: bad-try 4:13 | map_err
+fn g() -> Result[Int, Str] { Ok(1) }
+fn f() -> Result[Int, Int] {
+    let x = g()?;
+    Ok(x)
+}
+fn main() {}

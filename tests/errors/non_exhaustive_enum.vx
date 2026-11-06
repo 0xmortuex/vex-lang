@@ -1,0 +1,8 @@
+// expect: non-exhaustive-match 4:11 | Shape.Dot
+enum Shape { Circle(Float), Square(Float), Dot }
+fn main() {
+    match Shape.Dot {
+        Shape.Circle(r) => 1,
+        Shape.Square(s) => 2,
+    };
+}

@@ -1,0 +1,5 @@
+// expect: bad-operand 3:5
+fn twice[T](a: T) -> T {
+    a + a
+}
+fn main() {}

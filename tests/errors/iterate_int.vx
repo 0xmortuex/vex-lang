@@ -1,0 +1,4 @@
+// expect: not-iterable 3:14
+fn main() {
+    for x in 5 { }
+}

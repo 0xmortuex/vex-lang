@@ -1,0 +1,4 @@
+// expect: cannot-infer 3:13
+fn main() {
+    let x = None;
+}

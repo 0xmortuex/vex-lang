@@ -1,0 +1,7 @@
+// expect: or-pattern-bindings 4:19
+fn main() {
+    match (1, 2) {
+        (a, 0) | (b, 1) => 1,
+        _ => 2,
+    };
+}

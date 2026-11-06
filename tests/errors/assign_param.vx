@@ -1,0 +1,5 @@
+// expect: immutable-binding 3:5 | parameters are immutable
+fn f(n: Int) {
+    n = 2;
+}
+fn main() {}

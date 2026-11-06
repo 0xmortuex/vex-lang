@@ -1,0 +1,4 @@
+// expect: infinite-type 3:17
+fn main() {
+    let f = |x| x(x);
+}

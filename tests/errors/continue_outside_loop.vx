@@ -1,0 +1,4 @@
+// expect: outside-loop 3:5
+fn main() {
+    continue;
+}

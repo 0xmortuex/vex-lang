@@ -1,0 +1,6 @@
+// expect: non-exhaustive-match 3:11 | false
+fn main() {
+    match true {
+        true => 1,
+    };
+}

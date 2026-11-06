@@ -1,0 +1,3 @@
+// expect: duplicate-definition 2:14
+fn f(a: Int, a: Int) {}
+fn main() {}

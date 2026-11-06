@@ -1,0 +1,4 @@
+// expect: type-mismatch 3:13 | .to_float()
+fn main() {
+    let x = 1 + 2.0;
+}

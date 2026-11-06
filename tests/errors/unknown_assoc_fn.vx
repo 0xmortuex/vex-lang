@@ -1,0 +1,5 @@
+// expect: unknown-member 4:15
+struct S {}
+fn main() {
+    let s = S.build();
+}

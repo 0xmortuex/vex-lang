@@ -1,0 +1,4 @@
+// expect: undefined-name 3:5 | did you mean `print`
+fn main() {
+    pritn(1);
+}

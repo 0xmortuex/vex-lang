@@ -1,0 +1,4 @@
+// expect: bad-map-key 3:13
+fn main() {
+    let m = #{[1]: 2};
+}

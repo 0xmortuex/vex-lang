@@ -1,0 +1,5 @@
+// expect: no-method 4:7
+fn main() {
+    let n = 1;
+    n.push(2);
+}

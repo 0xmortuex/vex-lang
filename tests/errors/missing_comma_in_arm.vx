@@ -1,0 +1,7 @@
+// expect: expected-token 5:9
+fn main() {
+    let x = match 1 {
+        1 => 2
+        _ => 3,
+    };
+}

@@ -1,0 +1,6 @@
+// expect: outside-loop 4:20
+fn main() {
+    while true {
+        let f = || break;
+    }
+}

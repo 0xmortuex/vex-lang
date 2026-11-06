@@ -1,0 +1,7 @@
+// expect: non-exhaustive-match 3:11 | Some(_), false
+fn main() {
+    match (Some(1), true) {
+        (Some(_), true) => 1,
+        (None, _) => 2,
+    };
+}

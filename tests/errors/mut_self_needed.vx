@@ -1,0 +1,8 @@
+// expect: immutable-binding 5:9 | mut self
+struct C { n: Int }
+impl C {
+    fn bump(self) {
+        self.n = 1;
+    }
+}
+fn main() {}

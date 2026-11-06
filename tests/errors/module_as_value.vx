@@ -1,0 +1,4 @@
+// expect: not-a-value 3:13
+fn main() {
+    let m = math;
+}

@@ -396,11 +396,23 @@ class FnCompiler:
         if isinstance(tgt, ast.Name):
             sym = tgt.sym
             assert isinstance(sym, (LocalSym, GlobalVar))
-            if compound:
-                self.cname(tgt)
-            self.cx(e.value)
-            if compound:
-                self.carith(e.op[0], tgt.ty)
+            fused = (
+                compound
+                and e.op in ("+=", "-=")
+                and isinstance(e.value, ast.IntLit)
+                and isinstance(sym, LocalSym)
+                and not sym.boxed
+                and _ty_name(tgt.ty) == "Int"
+            )
+            if fused:
+                assert isinstance(sym, LocalSym) and isinstance(e.value, ast.IntLit)
+                self.emit(bc.ADDK_L if e.op == "+=" else bc.SUBK_L, (self.slots[sym], e.value.value))
+            else:
+                if compound:
+                    self.cname(tgt)
+                self.cx(e.value)
+                if compound:
+                    self.carith(e.op[0], tgt.ty)
             if isinstance(sym, LocalSym):
                 self.store_local(sym)
             else:

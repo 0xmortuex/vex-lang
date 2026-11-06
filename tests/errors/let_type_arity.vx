@@ -1,0 +1,4 @@
+// expect: type-arity 3:12
+fn main() {
+    let x: Option = None;
+}

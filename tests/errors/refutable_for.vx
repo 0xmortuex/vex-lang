@@ -1,0 +1,4 @@
+// expect: refutable-pattern 3:9
+fn main() {
+    for Some(x) in [Some(1)] { }
+}

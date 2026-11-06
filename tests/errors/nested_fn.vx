@@ -1,0 +1,4 @@
+// expect: nested-item 3:5
+fn main() {
+    fn inner() {}
+}

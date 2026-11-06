@@ -1,0 +1,4 @@
+// expect: unterminated-comment 3:5
+fn main() {
+    /* never closed
+}

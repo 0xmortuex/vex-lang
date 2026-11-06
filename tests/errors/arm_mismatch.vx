@@ -1,0 +1,7 @@
+// expect: type-mismatch 5:14
+fn main() {
+    let x = match 1 {
+        1 => 1,
+        _ => "a",
+    };
+}

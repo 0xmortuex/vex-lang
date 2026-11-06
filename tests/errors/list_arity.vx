@@ -1,0 +1,3 @@
+// expect: type-arity 2:9
+fn f(x: List[Int, Int]) {}
+fn main() {}

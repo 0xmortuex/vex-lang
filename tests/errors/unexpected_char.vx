@@ -1,0 +1,4 @@
+// expect: unexpected-character 3:15
+fn main() {
+    let x = 3 $ 4;
+}

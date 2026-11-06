@@ -1,0 +1,7 @@
+// expect: immutable-binding 6:10
+struct C { n: Int }
+fn bump(mut c: C) { c.n += 1; }
+fn main() {
+    let c = C { n: 0 };
+    bump(c);
+}

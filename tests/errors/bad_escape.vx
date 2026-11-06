@@ -1,0 +1,4 @@
+// expect: bad-escape 3:13
+fn main() {
+    print("a\qb");
+}

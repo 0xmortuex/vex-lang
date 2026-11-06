@@ -1,0 +1,4 @@
+// expect: int-literal-range 3:13
+fn main() {
+    let x = 9223372036854775808;
+}

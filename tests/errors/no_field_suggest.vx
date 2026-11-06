@@ -1,0 +1,6 @@
+// expect: no-field 5:13 | did you mean `width`
+struct P { width: Int }
+fn main() {
+    let p = P { width: 1 };
+    print(p.widht);
+}

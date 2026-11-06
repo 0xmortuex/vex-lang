@@ -1,0 +1,5 @@
+// expect: undefined-name 4:11 | did you mean `total`
+fn main() {
+    let total = 1;
+    print(totl);
+}

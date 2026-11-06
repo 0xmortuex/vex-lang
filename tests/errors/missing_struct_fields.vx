@@ -1,0 +1,5 @@
+// expect: missing-fields 4:13 | `y`
+struct P { x: Int, y: Int }
+fn main() {
+    let p = P { x: 1 };
+}

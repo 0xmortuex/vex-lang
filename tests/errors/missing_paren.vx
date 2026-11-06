@@ -1,0 +1,4 @@
+// expect: expected-token 3:12
+fn main() {
+    print(1;
+}

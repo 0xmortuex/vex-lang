@@ -1,0 +1,5 @@
+// expect: arity-mismatch 4:5 | takes 1 argument
+fn f(a: Int) {}
+fn main() {
+    f(1, 2);
+}

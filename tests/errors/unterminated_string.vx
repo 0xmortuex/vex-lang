@@ -1,0 +1,4 @@
+// expect: unterminated-string 3:13
+fn main() {
+    let s = "abc;
+}

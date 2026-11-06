@@ -1,0 +1,3 @@
+// expect: unclosed-block 2:11
+fn main() {
+    let x = 1;

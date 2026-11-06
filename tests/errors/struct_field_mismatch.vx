@@ -1,0 +1,5 @@
+// expect: type-mismatch 4:20 | field `x`
+struct P { x: Int }
+fn main() {
+    let p = P { x: "s" };
+}

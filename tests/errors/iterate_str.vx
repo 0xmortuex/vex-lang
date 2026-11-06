@@ -1,0 +1,4 @@
+// expect: not-iterable 3:14 | chars
+fn main() {
+    for c in "abc" { }
+}

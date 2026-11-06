@@ -1,0 +1,5 @@
+// expect: type-mismatch 4:7 | argument 1 of `f`
+fn f(n: Int) {}
+fn main() {
+    f("x");
+}

@@ -1,0 +1,4 @@
+// expect: pattern-mismatch 3:9
+fn main() {
+    let (a, b, c) = (1, 2);
+}

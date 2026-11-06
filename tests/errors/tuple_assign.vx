@@ -1,0 +1,5 @@
+// expect: immutable-binding 4:5
+fn main() {
+    let mut t = (1, 2);
+    t.0 = 5;
+}

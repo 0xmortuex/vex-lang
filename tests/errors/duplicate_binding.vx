@@ -1,0 +1,4 @@
+// expect: duplicate-binding 3:13
+fn main() {
+    let (a, a) = (1, 2);
+}

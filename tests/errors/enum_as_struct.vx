@@ -1,0 +1,5 @@
+// expect: not-a-struct 4:13
+enum E { A }
+fn main() {
+    let p = E { x: 1 };
+}

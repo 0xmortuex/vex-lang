@@ -1,0 +1,6 @@
+// expect: unsatisfied-bound 5:13
+struct P { x: Int }
+fn big[T: Ord](a: T, b: T) -> T { a }
+fn main() {
+    let p = big(P { x: 1 }, P { x: 2 });
+}

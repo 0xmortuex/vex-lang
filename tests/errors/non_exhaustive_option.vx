@@ -1,0 +1,6 @@
+// expect: non-exhaustive-match 3:11 | None
+fn main() {
+    match Some(1) {
+        Some(x) => x,
+    };
+}

@@ -1,0 +1,5 @@
+// expect: not-indexable 4:11 | char_at
+fn main() {
+    let s = "abc";
+    print(s[0]);
+}

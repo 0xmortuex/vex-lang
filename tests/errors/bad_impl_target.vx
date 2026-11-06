@@ -1,0 +1,5 @@
+// expect: bad-impl-target 2:6
+impl Int {
+    fn f(self) {}
+}
+fn main() {}
