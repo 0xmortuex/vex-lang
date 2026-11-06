@@ -1,0 +1,7 @@
+transfer ok
+transfer failed: insufficient funds: have 70, need 500
+transfer failed: invalid amount: -5
+alice: 70
+bob: 50
+  alice: opened with 100
+  alice: withdraw 30

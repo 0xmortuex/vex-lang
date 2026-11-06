@@ -165,8 +165,14 @@ class DiagSink:
 
     def __init__(self) -> None:
         self.items: list[Diagnostic] = []
+        self._capped = False
 
     def add(self, d: Diagnostic) -> None:
+        if len(self.items) >= self.MAX_ERRORS:
+            if not self._capped:
+                self._capped = True
+                self.items.append(Diagnostic("too-many-errors", f"too many diagnostics; stopping after {self.MAX_ERRORS}"))
+            return
         for old in self.items:
             if (
                 old.code == d.code

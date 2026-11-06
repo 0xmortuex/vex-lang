@@ -146,6 +146,7 @@ class Checker:
         self.ret_stack: list[Type] = []
         self.cur: FnSym | None = None
         self.callees: set[int] = set()
+        self.errors_before = 0
 
     # ------------------------------------------------------------ driver
     def check_all(self, fns: list[FnSym]) -> None:
@@ -161,9 +162,10 @@ class Checker:
         self.sink.error(code, msg, span, label, help=help, secondary=secondary, notes=notes)
 
     def check_fn(self, fn: FnSym) -> None:
-        saved = (self.exprs, self.deferred, self.ret_stack, self.cur)
+        saved = (self.exprs, self.deferred, self.ret_stack, self.cur, self.errors_before)
         self.exprs, self.deferred, self.ret_stack, self.cur = [], [], [], fn
         fn.state = 1
+        self.errors_before = len(self.sink.errors)
         try:
             assert fn.ret is not None
             self.ret_stack.append(fn.ret)
@@ -173,7 +175,7 @@ class Checker:
             self.finish()
         finally:
             fn.state = 2
-            self.exprs, self.deferred, self.ret_stack, self.cur = saved
+            self.exprs, self.deferred, self.ret_stack, self.cur, self.errors_before = saved
 
     def unify_block_result(self, body: ast.Block, t: Type, ret: Type, fn: FnSym) -> None:
         try:
@@ -229,7 +231,9 @@ class Checker:
                         self.err("bad-map-key", "Map keys must be Int, Str, Bool or tuples of those", e.span,
                                  f"key type `{show(k)}` is not allowed")  # fmt: skip
                         break
-            if not reported and any(isinstance(x, TVar) for x in walk(z)):
+            if not reported and len(self.sink.errors) == self.errors_before and any(
+                isinstance(x, TVar) for x in walk(z)
+            ):
                 reported = True
                 self.err("cannot-infer", "cannot infer the type of this expression", e.span,
                          f"type so far: `{show(z)}`",

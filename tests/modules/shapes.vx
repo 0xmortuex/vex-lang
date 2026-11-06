@@ -1,0 +1,5 @@
+import geometry;
+
+fn corner(n: Int) -> Vec2 {
+    origin().add(Vec2 { x: n, y: n * 2 })
+}

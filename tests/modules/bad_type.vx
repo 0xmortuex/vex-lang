@@ -1,0 +1,2 @@
+import bad_type_lib;
+fn main() { print(lib_fn()); }

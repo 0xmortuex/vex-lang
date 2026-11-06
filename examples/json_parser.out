@@ -1,0 +1,5 @@
+ok  depth=2 {"name":"Vex","tags":["fast","typed"],"year":2026,"ok":true}
+ok  depth=4 [1,[2,[3,[4]]],-5,null]
+err unexpected character '}' at 12
+err unterminated array
+ok  depth=0 "türkçe ğüşiöç"

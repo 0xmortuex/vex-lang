@@ -48,7 +48,6 @@ class SOr:
 SPat = Union[SWild, SCtor, SOr]
 WILD = SWild()
 
-_enum_families: dict[int, Family] = {}
 _BOOL_FAMILY = Family()
 _BOOL_FAMILY.ctors = [Ctor(("b", True), 0, "true", "bool", _BOOL_FAMILY), Ctor(("b", False), 0, "false", "bool", _BOOL_FAMILY)]
 _UNIT_FAMILY = Family()
@@ -56,13 +55,13 @@ _UNIT_FAMILY.ctors = [Ctor("unit", 0, "()", "unit", _UNIT_FAMILY)]
 
 
 def _enum_family(info: EnumInfo) -> Family:
-    fam = _enum_families.get(id(info))
+    fam: Family | None = info.family
     if fam is None:
         fam = Family()
         for v in info.variants:
             shown = v.name if info.span is None else f"{info.name}.{v.name}"
             fam.ctors.append(Ctor(("v", info.name, v.tag), len(v.fields), shown, "variant", fam))
-        _enum_families[id(info)] = fam
+        info.family = fam
     return fam
 
 

@@ -1,0 +1,7 @@
+import shapes;
+import geometry;
+
+fn main() {
+    let c = corner(3);
+    print("{c.x},{c.y}");
+}

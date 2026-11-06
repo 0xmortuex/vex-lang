@@ -170,6 +170,12 @@ def unify(a: Type, b: Type) -> None:
     b = prune(b)
     if a is b:
         return
+    if isinstance(a, TVar) and isinstance(b, TError):
+        a.ref = b  # poison: the error was already reported, do not report "cannot infer"
+        return
+    if isinstance(b, TVar) and isinstance(a, TError):
+        b.ref = a
+        return
     if isinstance(a, (TNever, TError)) or isinstance(b, (TNever, TError)):
         return
     if isinstance(a, TVar):

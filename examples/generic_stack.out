@@ -1,0 +1,8 @@
+size = 3, peek = Some(30)
+popped 30
+popped 20
+popped 10
+words: ["alpha", "beta"]
+largest int: Some(9)
+largest str: Some("zebra")
+largest of nothing: None

@@ -70,6 +70,7 @@ class EnumInfo:
         self.tparams = tparams
         self.variants: list[VariantInfo] = []
         self.span = span
+        self.family: Any = None  # cached pattern-constructor family (see exhaust.py)
 
     def variant(self, name: str) -> VariantInfo | None:
         for v in self.variants:
