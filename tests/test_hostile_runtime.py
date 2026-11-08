@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import subprocess
 import sys
+import time
 
 import pytest
 from helpers import run_body
@@ -108,3 +109,76 @@ def test_cli_diagnostics_stream_cannot_be_broken_by_an_undecodable_name() -> Non
     done = subprocess.run([sys.executable, "-c", script], capture_output=True, timeout=30)
     assert done.returncode == 0, done.stderr
     assert done.stderr.strip() == b"\\udc80"
+
+
+# ---------------------------------------------------------------- numeric and text conversions
+INF = "(1e308 * 10.0)"
+
+
+@pytest.mark.parametrize(
+    ("expr", "expected"),
+    [
+        (f"{INF} % 2.0", "NaN"),
+        (f"(0.0 - {INF}) % 2.0", "NaN"),
+        (f"{INF} % {INF}", "NaN"),
+        (f"1.5 % {INF}", "1.5"),
+        (f"({INF} - {INF}) % 2.0", "NaN"),
+        ("7.5 % 2.0", "1.5"),
+        ("(0.0 - 7.5) % 2.0", "-1.5"),
+    ],
+)
+def test_float_remainder_follows_ieee(expr: str, expected: str) -> None:
+    assert run_body(f"print({expr});") == expected + "\n"
+
+
+@pytest.mark.parametrize(
+    ("items", "expected"),
+    [
+        ("[1e308, 1e308]", "inf"),
+        (f"[{INF}, 0.0 - {INF}]", "NaN"),
+        ("[1e308, 1e308, 0.0 - 1e308]", "inf"),
+        (f"[{INF}, 1.0]", "inf"),
+        ("[0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1]", "1.0"),
+    ],
+)
+def test_sum_float_follows_ieee(items: str, expected: str) -> None:
+    assert run_body(f"print({items}.sum_float());") == expected + "\n"
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ('"9".repeat(5000)', "None"),
+        ('"-" + "9".repeat(5000)', "None"),
+        ('"0".repeat(5000) + "7"', "Some(7)"),
+        ('"-" + "0".repeat(5000) + "7"', "Some(-7)"),
+        ('"+" + "0".repeat(5000)', "Some(0)"),
+        ('"9223372036854775807"', "Some(9223372036854775807)"),
+        ('"9223372036854775808"', "None"),
+        ('"-9223372036854775808"', "Some(-9223372036854775808)"),
+        ('"-9223372036854775809"', "None"),
+        ('" 12 "', "Some(12)"),
+        ('"1x"', "None"),
+    ],
+)
+def test_str_to_int_never_reaches_the_bignum_digit_limit(text: str, expected: str) -> None:
+    assert run_body(f"print(({text}).to_int());") == expected + "\n"
+
+
+@pytest.mark.parametrize(
+    "text", ['"9".repeat(200000) + "x"', '"9".repeat(200000) + ".5x"', '"." + "9".repeat(200000) + "x"'],
+    ids=["digits", "fraction", "leading-dot"],
+)  # fmt: skip
+def test_str_to_float_rejects_long_input_in_linear_time(text: str) -> None:
+    started = time.monotonic()
+    assert run_body(f"print(({text}).to_float());") == "None\n"
+    assert time.monotonic() - started < 2.0
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [('"1.5"', "Some(1.5)"), ('"1."', "Some(1.0)"), ('".5"', "Some(0.5)"), ('"1e3"', "Some(1000.0)"), ('"1.5e-1"', "Some(0.15)"),
+     ('"+2"', "Some(2.0)"), ('"."', "None"), ('"e5"', "None"), ('"1e"', "None"), ('"1.2.3"', "None")],
+)  # fmt: skip
+def test_str_to_float_grammar_is_unchanged(text: str, expected: str) -> None:
+    assert run_body(f"print(({text}).to_float());") == expected + "\n"

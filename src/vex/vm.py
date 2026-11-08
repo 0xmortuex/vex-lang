@@ -372,7 +372,8 @@ class VM:
                     b = pop()
                     if b == 0.0:
                         raise VexPanic("division by zero in `%`")
-                    stack[-1] = math.fmod(stack[-1], b)
+                    a = stack[-1]
+                    stack[-1] = math.fmod(a, b) if math.isfinite(a) else math.nan
                 elif op == NEG_F:
                     stack[-1] = -stack[-1]
                 elif op == NEG_I:

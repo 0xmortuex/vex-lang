@@ -141,7 +141,8 @@ is outside `-9223372036854775808 … 9223372036854775807` stops the program with
 `integer overflow in <op>` (no wraparound, no saturation, no silent bignum). `/` truncates toward zero,
 `%` takes the sign of the dividend (`-7 / 2 == -3`, `-7 % 3 == -1`), and division or remainder by zero is
 a runtime error. `Float` follows IEEE-754 for `+ - *` (overflow gives `inf`, `NaN` propagates), but
-`/` and `%` by `0.0` are runtime errors; `Float.to_int()` truncates and rejects `NaN`/`inf`.
+`/` and `%` by `0.0` are runtime errors; an infinite left operand of `%` gives `NaN`, and `sum_float` follows
+the same IEEE rules; `Float.to_int()` truncates and rejects `NaN`/`inf`.
 
 ## Known limits of the type system
 

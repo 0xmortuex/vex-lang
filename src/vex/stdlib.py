@@ -190,16 +190,19 @@ method("Bool", "to_str", "(Bool) -> Str", display)
 
 # ------------------------------------------------------------------ Str
 _INT_RE = re.compile(r"[+-]?[0-9]+")
-_FLOAT_RE = re.compile(r"[+-]?([0-9]+\.?[0-9]*|\.[0-9]+)([eE][+-]?[0-9]+)?")
+# Each alternative decides on its next character: "[0-9]+\.?[0-9]*" backtracks quadratically on long digit runs.
+_FLOAT_RE = re.compile(r"[+-]?([0-9]+(\.[0-9]*)?|\.[0-9]+)([eE][+-]?[0-9]+)?")
 
 
 def _str_to_int(s: str) -> Any:
     s = s.strip()
-    if _INT_RE.fullmatch(s):
-        n = int(s)
-        if INT_MIN <= n <= INT_MAX:
-            return some(n)
-    return NONE
+    if not _INT_RE.fullmatch(s):
+        return NONE
+    magnitude = s.lstrip("+-").lstrip("0")
+    if len(magnitude) > 19:  # never ask int() for more digits than Python's bignum parsing limit allows
+        return NONE
+    n = -int(magnitude or "0") if s.startswith("-") else int(magnitude or "0")
+    return some(n) if INT_MIN <= n <= INT_MAX else NONE
 
 
 def _str_to_float(s: str) -> Any:
@@ -320,6 +323,13 @@ def _sum(xs: list[int]) -> int:
     return checked(sum(xs), "sum")
 
 
+def _sum_float(xs: list[float]) -> float:
+    try:
+        return math.fsum(xs)
+    except (OverflowError, ValueError):  # fsum refuses intermediate overflow; addition gives inf or NaN
+        return sum(xs, 0.0)
+
+
 def _join(xs: list[str], sep: str) -> str:
     return sep.join(xs)
 
@@ -370,7 +380,7 @@ method("List", "for_each", "[T](List[T], fn(T) -> Unit)", _for_each, needs_vm=Tr
 method("List", "enumerate", "[T](List[T]) -> List[(Int, T)]", lambda xs: list(enumerate(xs)))
 method("List", "zip", "[T, U](List[T], List[U]) -> List[(T, U)]", lambda xs, ys: list(zip(xs, ys)))
 method("List", "sum", "(List[Int]) -> Int", _sum)
-method("List", "sum_float", "(List[Float]) -> Float", lambda xs: math.fsum(xs))
+method("List", "sum_float", "(List[Float]) -> Float", _sum_float)
 method("List", "join", "(List[Str], Str) -> Str", _join)
 
 
