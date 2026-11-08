@@ -1,0 +1,123 @@
+// A config validator: parse `key = value` text against a typed schema and report every
+// problem with its line number, rather than stopping at the first one.
+
+enum Kind {
+    Port,
+    Flag,
+    Text,
+    OneOf(List[Str]),
+}
+
+enum Value {
+    Number(Int),
+    Switch(Bool),
+    Word(Str),
+}
+
+struct Field {
+    key: Str,
+    kind: Kind,
+    required: Bool,
+}
+
+struct Report {
+    values: Map[Str, Value],
+    problems: List[Str],
+}
+
+fn schema() -> List[Field] {
+    [
+        Field { key: "host", kind: Kind.Text, required: true },
+        Field { key: "port", kind: Kind.Port, required: true },
+        Field { key: "tls", kind: Kind.Flag, required: false },
+        Field { key: "log", kind: Kind.OneOf(["debug", "info", "error"]), required: false },
+    ]
+}
+
+fn parse_value(kind: Kind, raw: Str) -> Result[Value, Str] {
+    match kind {
+        Kind.Port => {
+            let n = raw.to_int().ok_or("`{raw}` is not a number")?;
+            if n < 1 || n > 65535 {
+                return Err("port {n} is outside 1..65535");
+            }
+            Ok(Value.Number(n))
+        }
+        Kind.Flag => match raw {
+            "true" | "on" => Ok(Value.Switch(true)),
+            "false" | "off" => Ok(Value.Switch(false)),
+            _ => Err("`{raw}` is not a boolean"),
+        },
+        Kind.Text if raw.is_empty() => Err("value must not be empty"),
+        Kind.Text => Ok(Value.Word(raw)),
+        Kind.OneOf(choices) => {
+            if choices.contains(raw) {
+                Ok(Value.Word(raw))
+            } else {
+                Err("`{raw}` is not one of {choices.join(", ")}")
+            }
+        }
+    }
+}
+
+fn split_line(line: Str) -> Option[(Str, Str)] {
+    let at = line.index_of("=")?;
+    Some((line.slice(0, at).trim(), line.slice(at + 1, line.len()).trim()))
+}
+
+fn validate(fields: List[Field], text: Str) -> Report {
+    let mut values: Map[Str, Value] = #{};
+    let mut problems: List[Str] = [];
+    let mut seen: List[Str] = [];
+    for (index, raw_line) in text.lines().enumerate() {
+        let number = index + 1;
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with("#") { continue; }
+        let (key, raw) = match split_line(line) {
+            Some(pair) => pair,
+            None => {
+                problems.push("line {number}: expected `key = value`");
+                continue;
+            }
+        };
+        let field = match fields.find(|f| f.key == key) {
+            Some(f) => f,
+            None => {
+                problems.push("line {number}: unknown key `{key}`");
+                continue;
+            }
+        };
+        if seen.contains(key) {
+            problems.push("line {number}: `{key}` is set twice");
+            continue;
+        }
+        seen.push(key);
+        match parse_value(field.kind, raw) {
+            Ok(v) => values.insert(key, v),
+            Err(why) => problems.push("line {number}: {key}: {why}"),
+        }
+    }
+    for field in fields {
+        if field.required && !seen.contains(field.key) {
+            problems.push("missing required key `{field.key}`");
+        }
+    }
+    Report { values, problems }
+}
+
+fn show(name: Str, report: Report) {
+    if report.problems.is_empty() {
+        print("{name}: valid, {report.values.len()} keys");
+        for (key, value) in report.values.entries() { print("  {key} = {value}"); }
+    } else {
+        print("{name}: {report.problems.len()} problems");
+        for p in report.problems { print("  {p}"); }
+    }
+}
+
+fn main() {
+    let good = "# production\nhost = db.internal\nport = 5432\ntls = on\nlog = info\n";
+    let bad = "port = 99999\ntls = maybe\ncolour = red\nlog = trace\nlog = info\nnonsense\n";
+    show("good.conf", validate(schema(), good));
+    show("bad.conf", validate(schema(), bad));
+}

@@ -1,0 +1,94 @@
+// A data transformation: turn CSV sales rows into a per-region summary. Malformed rows
+// are collected and reported with their line numbers instead of poisoning the totals.
+
+struct Sale {
+    region: Str,
+    product: Str,
+    units: Int,
+    cents: Int,
+}
+
+struct Summary {
+    region: Str,
+    orders: Int,
+    units: Int,
+    cents: Int,
+    best: Str,
+}
+
+fn parse_row(line: Str) -> Result[Sale, Str] {
+    let cols = line.split(",").map(|c| c.trim());
+    if cols.len() != 4 {
+        return Err("expected 4 columns, found {cols.len()}");
+    }
+    let units = cols[2].to_int().ok_or("units `{cols[2]}` is not a number")?;
+    if units < 0 {
+        return Err("units must not be negative");
+    }
+    let price = cols[3].to_float().ok_or("price `{cols[3]}` is not a number")?;
+    Ok(Sale { region: cols[0], product: cols[1], units, cents: (price * 100.0).round().to_int() * units })
+}
+
+fn add_to(mut totals: Map[Str, Int], key: Str, amount: Int) {
+    totals.insert(key, totals.get(key).unwrap_or(0) + amount);
+}
+
+fn summarize(region: Str, sales: List[Sale]) -> Summary {
+    let mine = sales.filter(|s| s.region == region);
+    let mut by_product: Map[Str, Int] = #{};
+    for s in mine { add_to(by_product, s.product, s.cents); }
+    // Sort by (revenue, name) so that ties have one answer.
+    let ranked = by_product.entries().map(|e| (e.1, e.0)).sorted();
+    Summary {
+        region,
+        orders: mine.len(),
+        units: mine.map(|s| s.units).sum(),
+        cents: mine.map(|s| s.cents).sum(),
+        best: ranked.last().map(|r| r.1).unwrap_or("-"),
+    }
+}
+
+fn money(cents: Int) -> Str {
+    let frac = cents % 100;
+    "{cents / 100}.{if frac < 10 { "0" } else { "" }}{frac}"
+}
+
+fn pad(s: Str, width: Int) -> Str {
+    s + " ".repeat((width - s.len()).max(0))
+}
+
+fn main() {
+    let csv = "region, product, units, price
+north, widget, 3, 9.99
+south, gadget, 1, 24.50
+north, gadget, 2, 24.50
+east, widget, x, 9.99
+south, widget, 10, 9.99
+west, widget
+north, sprocket, 1, 100.00
+south, gadget, -4, 24.50";
+
+    let mut sales: List[Sale] = [];
+    let mut errors: List[Str] = [];
+    for (i, line) in csv.lines().enumerate() {
+        if i == 0 { continue; }
+        match parse_row(line) {
+            Ok(s) => sales.push(s),
+            Err(e) => errors.push("line {i + 1}: {e}"),
+        }
+    }
+
+    let mut regions: List[Str] = [];
+    for s in sales {
+        if !regions.contains(s.region) { regions.push(s.region); }
+    }
+    regions.sort();
+
+    print("{pad("region", 8)}{pad("orders", 8)}{pad("units", 7)}{pad("revenue", 10)}best seller");
+    for r in regions.map(|name| summarize(name, sales)) {
+        print("{pad(r.region, 8)}{pad(r.orders.to_str(), 8)}{pad(r.units.to_str(), 7)}{pad(money(r.cents), 10)}{r.best}");
+    }
+    print("total revenue: {money(sales.map(|s| s.cents).sum())}");
+    print("{errors.len()} rows skipped");
+    for e in errors { print("  {e}"); }
+}

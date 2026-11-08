@@ -1,0 +1,75 @@
+// Text templating: render `[[name]]` placeholders and `[[name|filter]]` pipes from a map.
+// Unknown names and filters are errors the author sees, not silently empty output.
+// (Square brackets because `{` starts an interpolation in a Vex string.)
+
+enum Part {
+    Literal(Str),
+    Slot(Str, List[Str]),
+}
+
+fn parse_template(text: Str) -> Result[List[Part], Str] {
+    let mut parts: List[Part] = [];
+    let mut rest = text;
+    while true {
+        let open = match rest.index_of("[[") {
+            Some(at) => at,
+            None => break,
+        };
+        if open > 0 { parts.push(Part.Literal(rest.slice(0, open))); }
+        let after = rest.slice(open + 2, rest.len());
+        let close = after.index_of("]]").ok_or("unclosed `[[` near `{after}`")?;
+        let pieces = after.slice(0, close).split("|").map(|p| p.trim());
+        if pieces[0].is_empty() { return Err("empty placeholder"); }
+        parts.push(Part.Slot(pieces[0], pieces.slice(1, pieces.len())));
+        rest = after.slice(close + 2, after.len());
+    }
+    if !rest.is_empty() { parts.push(Part.Literal(rest)); }
+    Ok(parts)
+}
+
+fn apply_filter(value: Str, filter: Str) -> Result[Str, Str] {
+    match filter {
+        "upper" => Ok(value.upper()),
+        "lower" => Ok(value.lower()),
+        "trim" => Ok(value.trim()),
+        "title" => {
+            let first = value.slice(0, value.len().min(1)).upper();
+            Ok(first + value.slice(value.len().min(1), value.len()))
+        }
+        other => Err("unknown filter `{other}`"),
+    }
+}
+
+fn render(text: Str, vars: Map[Str, Str]) -> Result[Str, Str] {
+    let mut out: List[Str] = [];
+    for part in parse_template(text)? {
+        match part {
+            Part.Literal(s) => out.push(s),
+            Part.Slot(name, filters) => {
+                let mut value = vars.get(name).ok_or("unknown variable `{name}`")?;
+                for filter in filters {
+                    value = apply_filter(value, filter)?;
+                }
+                out.push(value);
+            }
+        }
+    }
+    Ok(out.join(""))
+}
+
+fn show(text: Str, vars: Map[Str, Str]) {
+    match render(text, vars) {
+        Ok(s) => print(s),
+        Err(e) => print("template error: {e}"),
+    }
+}
+
+fn main() {
+    let vars = #{"name": "İpek", "city": "  izmir ", "plan": "pro"};
+    show("Hello [[name]], your [[plan|upper]] plan is active.", vars);
+    show("Shipping to [[city|trim|title]].", vars);
+    show("No placeholders at all.", vars);
+    show("Dear [[nmae]],", vars);
+    show("[[plan|shout]]", vars);
+    show("Broken [[name", vars);
+}
