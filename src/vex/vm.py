@@ -122,6 +122,13 @@ class VM:
         if self.fuel < 0:
             raise VexBudgetExceeded(BUDGET_MESSAGE)
 
+    def charge_key(self, key: Any) -> None:
+        """Spend budget for hashing and comparing a map key: a key is a scalar, a Str, or a tuple of those."""
+        if type(key) is str:
+            self.charge(len(key))
+        elif type(key) is tuple:
+            charge_size(key, self.charge)
+
     def equal(self, a: Any, b: Any) -> bool:
         """Vex ``==``, charged to the budget while it compares."""
         return values_equal(a, b, self.charge)
@@ -474,6 +481,8 @@ class VM:
                     flat = stack[-n2:] if n2 else []
                     if n2:
                         del stack[-n2:]
+                    for i in range(0, n2, 2):
+                        self.charge_key(flat[i])
                     push({flat[i]: flat[i + 1] for i in range(0, n2, 2)})
                 elif op == INDEX:
                     i = pop()
@@ -483,6 +492,7 @@ class VM:
                             raise VexPanic(f"index {i} out of bounds for list of length {len(obj)}")
                         stack[-1] = obj[i]
                     else:
+                        self.charge_key(i)
                         if i not in obj:
                             raise VexPanic(f"key {display(i, False, self.charge)} not found in map")
                         stack[-1] = obj[i]
@@ -493,6 +503,8 @@ class VM:
                     if type(obj) is list:
                         if i < 0 or i >= len(obj):
                             raise VexPanic(f"index {i} out of bounds for list of length {len(obj)}")
+                    else:
+                        self.charge_key(i)
                     obj[i] = v
                 elif op == SET_FIELD:
                     v = pop()

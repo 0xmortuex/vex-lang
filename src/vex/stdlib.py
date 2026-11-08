@@ -92,8 +92,8 @@ def glob(name: str, sig: str, impl: Callable[..., Any], needs_vm: bool = False) 
     _reg(GLOBALS, name, name, sig, impl, needs_vm=needs_vm)
 
 
-def ns(space: str, name: str, sig: str, impl: Callable[..., Any]) -> None:
-    _reg(NAMESPACES[space], f"{space}.{name}", name, sig, impl)
+def ns(space: str, name: str, sig: str, impl: Callable[..., Any], needs_vm: bool = False) -> None:
+    _reg(NAMESPACES[space], f"{space}.{name}", name, sig, impl, needs_vm=needs_vm)
 
 
 def const(space: str, name: str, ty: Type, value: Any) -> None:
@@ -108,6 +108,22 @@ def _by_input(impl: Callable[..., Any]) -> Callable[..., Any]:
         return impl(*args)
 
     return go
+
+
+def _by_key(impl: Callable[..., Any]) -> Callable[..., Any]:
+    """Charge the size of a builtin's map key before it runs (``needs_vm=True``); see ``VM.charge_key``."""
+
+    def go(vm: Any, m: Any, key: Any, *rest: Any) -> Any:
+        vm.charge_key(key)
+        return impl(m, key, *rest)
+
+    return go
+
+
+def _snapshot(vm: Any, xs: list[Any]) -> list[Any]:
+    """A callback may change ``xs``, so loop over a copy. The copy is real work, charged before it is made."""
+    vm.charge(len(xs))
+    return list(xs)
 
 
 def checked(r: int, what: str) -> int:
@@ -390,7 +406,7 @@ def _last(xs: list[Any]) -> Any:
 
 
 def _for_each(vm: Any, xs: list[Any], f: Any) -> None:
-    for x in list(xs):
+    for x in _snapshot(vm, xs):
         vm.call(f, [x])
 
 
@@ -414,14 +430,14 @@ method("List", "slice", "[T](List[T], Int, Int) -> List[T]", _list_slice, needs_
 method("List", "concat", "[T](List[T], List[T]) -> List[T]", _by_input(lambda xs, ys: xs + ys), needs_vm=True)
 method("List", "copy", "[T](List[T]) -> List[T]", _by_input(list), needs_vm=True)
 method("List", "map", "[T, U](List[T], fn(T) -> U) -> List[U]",
-       lambda vm, xs, f: [vm.call(f, [x]) for x in list(xs)], needs_vm=True)  # fmt: skip
+       lambda vm, xs, f: [vm.call(f, [x]) for x in _snapshot(vm, xs)], needs_vm=True)  # fmt: skip
 method("List", "filter", "[T](List[T], fn(T) -> Bool) -> List[T]",
-       lambda vm, xs, f: [x for x in list(xs) if vm.call(f, [x])], needs_vm=True)  # fmt: skip
+       lambda vm, xs, f: [x for x in _snapshot(vm, xs) if vm.call(f, [x])], needs_vm=True)  # fmt: skip
 method("List", "fold", "[T, U](List[T], U, fn(U, T) -> U) -> U", _fold, needs_vm=True)
 method("List", "any", "[T](List[T], fn(T) -> Bool) -> Bool",
-       lambda vm, xs, f: any(vm.call(f, [x]) for x in list(xs)), needs_vm=True)  # fmt: skip
+       lambda vm, xs, f: any(vm.call(f, [x]) for x in _snapshot(vm, xs)), needs_vm=True)  # fmt: skip
 method("List", "all", "[T](List[T], fn(T) -> Bool) -> Bool",
-       lambda vm, xs, f: all(vm.call(f, [x]) for x in list(xs)), needs_vm=True)  # fmt: skip
+       lambda vm, xs, f: all(vm.call(f, [x]) for x in _snapshot(vm, xs)), needs_vm=True)  # fmt: skip
 method("List", "find", "[T](List[T], fn(T) -> Bool) -> Option[T]", _find, needs_vm=True)
 method("List", "for_each", "[T](List[T], fn(T) -> Unit)", _for_each, needs_vm=True)
 method("List", "enumerate", "[T](List[T]) -> List[(Int, T)]", _by_input(lambda xs: list(enumerate(xs))), needs_vm=True)
@@ -442,11 +458,11 @@ def _map_remove(m: dict[Any, Any], k: Any) -> Any:
 
 method("Map", "len", "[K, V](Map[K, V]) -> Int", len)
 method("Map", "is_empty", "[K, V](Map[K, V]) -> Bool", lambda m: not m)
-method("Map", "get", "[K, V](Map[K, V], K) -> Option[V]", _map_get)
-method("Map", "insert", "[K, V](Map[K, V], K, V)", lambda m, k, v: m.__setitem__(k, v), mutates=True)
-method("Map", "remove", "[K, V](Map[K, V], K) -> Option[V]", _map_remove, mutates=True)
+method("Map", "get", "[K, V](Map[K, V], K) -> Option[V]", _by_key(_map_get), needs_vm=True)
+method("Map", "insert", "[K, V](Map[K, V], K, V)", _by_key(lambda m, k, v: m.__setitem__(k, v)), mutates=True, needs_vm=True)
+method("Map", "remove", "[K, V](Map[K, V], K) -> Option[V]", _by_key(_map_remove), mutates=True, needs_vm=True)
 method("Map", "clear", "[K, V](Map[K, V])", lambda m: m.clear(), mutates=True)
-method("Map", "contains_key", "[K, V](Map[K, V], K) -> Bool", lambda m, k: k in m)
+method("Map", "contains_key", "[K, V](Map[K, V], K) -> Bool", _by_key(lambda m, k: k in m), needs_vm=True)
 method("Map", "keys", "[K, V](Map[K, V]) -> List[K]", _by_input(lambda m: list(m.keys())), needs_vm=True)
 method("Map", "values", "[K, V](Map[K, V]) -> List[V]", _by_input(lambda m: list(m.values())), needs_vm=True)
 method("Map", "entries", "[K, V](Map[K, V]) -> List[(K, V)]", _by_input(lambda m: list(m.items())), needs_vm=True)
@@ -561,15 +577,27 @@ ns("math", "gcd", "(Int, Int) -> Int", _gcd)
 ns("math", "hypot", "(Float, Float) -> Float", math.hypot)
 
 
-def _read_file(path: str) -> Any:
+# Input of unknown size is read and charged in pieces of this many characters.
+_IO_CHUNK = 65_536
+
+
+def _read_file(vm: Any, path: str) -> Any:
+    vm.charge(len(path))
     try:
         with open(path, encoding="utf-8") as fh:
-            return ok(fh.read())
+            parts: list[str] = []
+            while True:
+                part = fh.read(_IO_CHUNK)
+                vm.charge(len(part))
+                parts.append(part)
+                if len(part) < _IO_CHUNK:
+                    return ok("".join(parts))
     except (OSError, UnicodeDecodeError) as e:
         return err(f"{path}: {e.strerror if isinstance(e, OSError) and e.strerror else e}")
 
 
-def _write_file(path: str, text: str) -> Any:
+def _write_file(vm: Any, path: str, text: str) -> Any:
+    vm.charge(len(path) + len(text))
     try:
         with open(path, "w", encoding="utf-8", newline="") as fh:
             fh.write(text)
@@ -578,8 +606,15 @@ def _write_file(path: str, text: str) -> Any:
         return err(f"{path}: {e.strerror or e}")
 
 
-def _read_line() -> Any:
-    line = sys.stdin.readline()
+def _read_line(vm: Any) -> Any:
+    parts: list[str] = []
+    while True:
+        part = sys.stdin.readline(_IO_CHUNK)
+        vm.charge(len(part))
+        parts.append(part)
+        if len(part) < _IO_CHUNK or part.endswith("\n"):
+            break
+    line = "".join(parts)
     return NONE if line == "" else some(line.rstrip("\r\n"))
 
 
@@ -588,10 +623,10 @@ def _env_get(name: str) -> Any:
     return NONE if v is None else some(v)
 
 
-ns("io", "read_file", "(Str) -> Result[Str, Str]", _read_file)
-ns("io", "write_file", "(Str, Str) -> Result[Unit, Str]", _write_file)
-ns("io", "read_line", "() -> Option[Str]", _read_line)
-ns("env", "get", "(Str) -> Option[Str]", _env_get)
+ns("io", "read_file", "(Str) -> Result[Str, Str]", _read_file, needs_vm=True)
+ns("io", "write_file", "(Str, Str) -> Result[Unit, Str]", _write_file, needs_vm=True)
+ns("io", "read_line", "() -> Option[Str]", _read_line, needs_vm=True)
+ns("env", "get", "(Str) -> Option[Str]", _by_input(_env_get), needs_vm=True)
 # env.args needs the VM (program arguments), registered with needs_vm below.
 _reg(NAMESPACES["env"], "env.args", "args", "() -> List[Str]", lambda vm: list(vm.args), needs_vm=True)
 

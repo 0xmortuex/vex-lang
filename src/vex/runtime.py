@@ -217,9 +217,10 @@ def display(v: Any, top: bool = True, charge: Callable[[int], None] | None = Non
     """
     if v is None or type(v) in (bool, int, float):
         return _scalar_text(v)
-    if type(v) is str and top:
-        return v
     spend = charge or _no_charge
+    if type(v) is str and top:
+        spend(len(v))
+        return v
     out: list[str] = []
     work: list[tuple[Any, int]] = [(v, _TOP if top else _NESTED)]
     while work:

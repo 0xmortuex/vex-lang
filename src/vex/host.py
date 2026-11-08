@@ -182,8 +182,10 @@ class Host:
         self._depth += 1
         Host._active_calls += 1
         try:
-            vm.charge(1)
+            vm.charge(1 + sum(len(a) for a in args if type(a) is str))
             result = vm.execute(code, list(args) + [None] * (code.nlocals - len(args)))
+            if type(result) is str:  # the result is copied to the host, once per crossing
+                vm.charge(len(result))
         except VexBudgetExceeded as e:
             raise VexBudgetError(e.message, e.trace or []) from None
         except VexHostContractError as e:
@@ -234,6 +236,9 @@ class Host:
         """Turn a host callable into a builtin: every failure becomes a VexPanic with a script location."""
 
         def invoke(*args: Any) -> Any:
+            for a in args:  # copying a Str across the boundary costs its length
+                if type(a) is str:
+                    self._vm.charge(len(a))
             try:
                 result = fn(*args)
             except VexPanic:
@@ -250,6 +255,8 @@ class Host:
                 raise VexPanic(f"host function `{name}` raised {type(e).__name__}: {e}") from None
             if self._vm.fuel < 0:  # a re-entrant call ran out, and the host carried on regardless
                 raise VexBudgetExceeded("execution budget exhausted")
+            if type(result) is str:
+                self._vm.charge(len(result))
             problem = _value_problem(ty.ret, result)
             if problem is not None:
                 raise VexHostContractError(f"host function `{name}` broke its signature: {problem}")

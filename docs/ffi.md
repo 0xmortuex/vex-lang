@@ -207,7 +207,14 @@ time or memory ahead of its budget:
 - Formatting: `print`, `eprint`, interpolation, and the text of `assert_eq`, `unwrap`, `expect` and `unwrap_err`.
 - Builtins that read or build strings and collections, including `contains`, `index_of`, `sort`, `sorted`, `reverse`, `insert`,
   `remove_at`, `sum`, `repeat`, `replace`, `join`, `split`, `concat`, `copy`, range materialisation and `Map.keys`.
+- Builtins that take a callback (`map`, `filter`, `any`, `all`, `for_each`) charge for the copy of the list they loop over before
+  the first callback, so an early exit still pays for the set-up. `find` and `fold` copy nothing and charge per callback only.
+- Map lookups and updates (`m[k]`, `m[k] = v`, `get`, `insert`, `remove`, `contains_key`, map literals) charge the size of the key.
+- Reading and writing through `io.*`, and a `Str` crossing the boundary in either direction, one unit per character.
 - `+` on `Str`.
+
+`List.push`, `List.clear` and `Map.clear` are constant or amortised: `push` is paid for by whatever loop makes the calls, and
+`clear` frees only what was charged when it was built. `tests/test_budget_audit.py` lists every builtin with its classification.
 
 The budget resets at each outermost `call`. When it runs out, the script stops with status 4 at its current location.
 
