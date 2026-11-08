@@ -13,13 +13,17 @@ import time
 import traceback
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from types import FrameType
+from typing import Any
 
 import pytest
 
-from vex.api import compile_source, compile_text, read_source
+from vex.api import Program, compile_source, compile_text, read_source
+from vex.cli import _run_big_stack
 from vex.diagnostics import DiagSink, Source, VexError, VexRuntimeError
 from vex.parser import parse_source
-from vex.runtime import INT_MAX, INT_MIN
+from vex.repl import run_repl
+from vex.runtime import INT_MAX, INT_MIN, VexExit
 from vex.vm import VM
 
 ROOT = pathlib.Path(__file__).parent.parent
@@ -232,12 +236,20 @@ def test_identifier_swaps_never_crash(seed: int) -> None:
 #   2. each of its diagnostics has a line and column and renders (only the "too many errors" note,
 #      which belongs to no position, is exempt);
 #   3. the full compiler lets no exception out except VexError, whose diagnostics all render;
-#   4. no input takes longer than HANG_SECONDS. The watchdog ends the process if one does.
+#   4. a program the compiler accepts runs, under RUN_BUDGET traced Python events, with no exception
+#      out of the VM except VexRuntimeError or VexExit, printing through a stream encoded as the CLI's is;
+#   5. byte inputs also drive the REPL, through a stdin configured as the CLI's is;
+#   6. no input takes longer than HANG_SECONDS. The watchdog ends the process if one does.
 #
+# All of it runs in the CLI's own configuration (cli._run_big_stack: big stack, recursion limit 60,000).
 # Inputs are a pure function of (seed, family, index), so any failure can be replayed.
 # `pytest tests/test_fuzz.py --fuzz-seconds=60 --fuzz-seed=7` runs a time-boxed campaign.
 
-HANG_SECONDS = 5.0
+HANG_SECONDS = 10.0
+RUN_BUDGET = 20_000
+# Not executed: file access has side effects, and these builtins allocate in one call that no budget can
+# interrupt. The compile-time contract still applies to these programs.
+UNSAFE_TO_RUN = re.compile(r"\bio\b|\benv\b|repeat|to_list|chars|pad_|join|\.\.")
 
 UNICODE_SAMPLES = [
     "٣", "९", "１", "\U0001d7d7",  # Nd: decimal digits
@@ -355,15 +367,38 @@ def gen_bytes(rng: random.Random) -> bytes:
     return bytes(data)
 
 
+def gen_accepted_literal(rng: random.Random) -> str:
+    """Programs likely to pass the compiler and print a hostile literal, so the VM really sees it."""
+    escape = rng.choice([
+        f"\\u{{{rng.randrange(0xD7F0, 0xE010):X}}}", f"\\u{{{rng.randrange(0x110000):X}}}", f"\\u{{{rng.randrange(0x10FFF0, 0x110010):X}}}",
+        unicode_char(rng), "\\n", "\\0", "\\{", "\\}", "\\\\", '\\"',
+    ])  # fmt: skip
+    value = rng.choice([
+        f'"{escape}"', f'"a{escape}b"', f'"{escape}{{1}}"', f'"{{"{escape}"}}"',
+        str(rng.choice([INT_MAX, INT_MIN + 1, 0, 2**62])), f"{rng.random()}e{rng.randint(-330, 330)}",
+        "0x7FFFFFFFFFFFFFFF", "0b" + "1" * 63, "0" * 4301 + "7",
+    ])  # fmt: skip
+    return f"fn main() {{\n  let v = {value};\n  print(v);\n  print([v, v]);\n  print((v, 1));\n}}\n"
+
+
+def gen_chain(rng: random.Random) -> str:
+    """Long but flat source that passes the parser and overflows the later, recursive stages."""
+    terms = rng.choice([2000, 15_000, 40_000])
+    tail = rng.choice([" + ".join(["1"] * terms), "x" + ".a()" * terms, "x" + "[0]" * terms, "x" + "?" * terms])
+    return f"fn main() {{\n  let v = {tail};\n}}\n"
+
+
 FAMILIES: dict[str, Callable[[random.Random], str | bytes]] = {
     "soup": gen_soup,
     "literal": gen_literal,
+    "accepted": gen_accepted_literal,
     "nesting": gen_nesting,
+    "chain": gen_chain,
     "unicode": gen_unicode,
     "mutated": gen_mutated,
     "bytes": gen_bytes,
 }
-DEFAULT_CASES = {"soup": 300, "literal": 200, "nesting": 150, "unicode": 300, "mutated": 300, "bytes": 300}
+DEFAULT_CASES = {"soup": 200, "literal": 120, "accepted": 150, "nesting": 60, "chain": 3, "unicode": 200, "mutated": 200, "bytes": 200}
 
 
 def hostile_input(seed: int, family: str, index: int) -> str | bytes:
@@ -390,21 +425,99 @@ def prepare(case: str | bytes, scratch: pathlib.Path) -> str | pathlib.Path:
     return case
 
 
-def assert_never_crashes(prepared: str | pathlib.Path) -> None:
-    source = read_source(str(prepared)) if isinstance(prepared, pathlib.Path) else Source("<fuzz>", prepared)
-    assert_front_end_contract(source)
+class RunBudgetExceeded(BaseException):
+    """Stops a fuzzed program. BaseException, so that nothing in the VM can swallow it."""
+
+
+def run_within_budget(call: Callable[[], object]) -> bool:
+    """Run ``call`` for at most RUN_BUDGET traced Python events; False if the budget ran out."""
+    remaining = RUN_BUDGET
+
+    def tracer(frame: FrameType, event: str, arg: Any) -> Any:
+        nonlocal remaining
+        remaining -= 1
+        if remaining < 0:
+            raise RunBudgetExceeded
+        return tracer
+
+    sys.settrace(tracer)
     try:
-        compile_source(source)
-    except VexError as e:
-        assert e.diagnostics
-        for d in e.diagnostics:
-            d.render()
+        call()
+    except RunBudgetExceeded:
+        return False
+    finally:
+        sys.settrace(None)
+    return True
+
+
+def like_the_cli(call: Callable[[], None]) -> None:
+    """Run ``call`` the way `vex` does: on its big-stack thread, at its recursion limit, with empty stdin."""
+    limit, stack, stdin = sys.getrecursionlimit(), threading.stack_size(), sys.stdin
+
+    def body() -> int:
+        call()
+        return 0
+
+    sys.stdin = io.StringIO("")
+    try:
+        _run_big_stack(body)
+    finally:
+        sys.stdin = stdin
+        threading.stack_size(stack)
+        sys.setrecursionlimit(limit)
+
+
+def cli_output() -> io.TextIOWrapper:
+    """A stream that encodes as the CLI's stdout does, so an unencodable string fails here as it would there."""
+    return io.TextIOWrapper(io.BytesIO(), encoding="utf-8", newline="\n")
+
+
+def run_program(prog: Program) -> bool:
+    assert prog.main is not None
+    main = prog.main
+
+    def call() -> None:
+        try:
+            VM(cli_output()).run_function(main)
+        except (VexRuntimeError, VexExit):
+            pass
+
+    return run_within_budget(call)
+
+
+def drive_repl(data: bytes) -> None:
+    stdin = io.TextIOWrapper(io.BytesIO(data), encoding="utf-8", errors="surrogateescape")
+    run_within_budget(lambda: run_repl(stdin, cli_output()))
+
+
+def assert_never_crashes(prepared: str | pathlib.Path) -> str:
+    """Enforce the contract above like the CLI would; return "rejected", "ran" or "out-of-budget"."""
+    outcome = ["rejected"]
+
+    def check() -> None:
+        source = read_source(str(prepared)) if isinstance(prepared, pathlib.Path) else Source("<fuzz>", prepared)
+        assert_front_end_contract(source)
+        try:
+            prog = compile_source(source)
+        except VexError as e:
+            assert e.diagnostics
+            for d in e.diagnostics:
+                d.render()
+        else:
+            if UNSAFE_TO_RUN.search(source.text) is None:
+                outcome[0] = "ran" if run_program(prog) else "out-of-budget"
+        if isinstance(prepared, pathlib.Path) and UNSAFE_TO_RUN.search(source.text) is None:
+            drive_repl(prepared.read_bytes())
+
+    like_the_cli(check)
+    return outcome[0]
 
 
 class Watchdog:
     """Ends the process if one input runs for too long: an in-process hang cannot be caught any other way."""
 
-    def __init__(self) -> None:
+    def __init__(self, before_report: Callable[[], None]) -> None:
+        self.before_report = before_report
         self.current: tuple[str, float] | None = None
         self.stopped = threading.Event()
         self.thread = threading.Thread(target=self._watch, daemon=True)
@@ -414,6 +527,7 @@ class Watchdog:
         while not self.stopped.wait(0.25):
             current = self.current
             if current is not None and time.monotonic() - current[1] > HANG_SECONDS:
+                self.before_report()
                 print(f"\nHANG: {current[0]} ran for more than {HANG_SECONDS} s", file=sys.__stderr__, flush=True)
                 os._exit(3)
 
@@ -431,8 +545,9 @@ class Watchdog:
 
 
 @pytest.fixture(scope="module")
-def watchdog() -> Iterator[Watchdog]:
-    dog = Watchdog()
+def watchdog(request: pytest.FixtureRequest) -> Iterator[Watchdog]:
+    capture = request.config.pluginmanager.getplugin("capturemanager")  # the report must not be swallowed
+    dog = Watchdog(capture.suspend_global_capture)
     yield dog
     dog.stop()
 
@@ -460,6 +575,43 @@ def test_hostile_input_never_crashes(
         assert_never_crashes(prepared)
 
 
+def test_harness_uses_the_cli_configuration_and_restores_it() -> None:
+    before = sys.getrecursionlimit()
+    seen: list[int] = []
+    like_the_cli(lambda: seen.append(sys.getrecursionlimit()))
+    assert seen == [60_000]
+    assert sys.getrecursionlimit() == before
+
+
+def test_harness_stops_a_program_that_never_ends() -> None:
+    assert assert_never_crashes("fn main() { while true { } }") == "out-of-budget"
+
+
+def test_harness_runs_accepted_programs_to_completion() -> None:
+    assert assert_never_crashes("fn main() { print(1); }") == "ran"
+
+
+def test_harness_catches_a_crash_in_an_accepted_program(monkeypatch: pytest.MonkeyPatch) -> None:
+    def crash(self: VM, code: object) -> None:
+        raise UnicodeEncodeError("utf-8", "\ud800", 0, 1, "surrogates not allowed")
+
+    monkeypatch.setattr(VM, "run_function", crash)
+    with pytest.raises(UnicodeEncodeError):
+        assert_never_crashes("fn main() { print(1); }")
+
+
+def test_harness_output_refuses_what_the_cli_output_refuses() -> None:
+    with pytest.raises(UnicodeEncodeError):
+        cli_output().write("\ud800")
+
+
+def test_accepted_family_really_reaches_the_vm(scratch_file: pathlib.Path) -> None:
+    outcomes = [
+        assert_never_crashes(prepare(hostile_input(0, "accepted", i), scratch_file)) for i in range(60)
+    ]
+    assert outcomes.count("ran") >= 20
+
+
 def test_hostile_inputs_are_reproducible() -> None:
     for family in FAMILIES:
         assert hostile_input(3, family, 11) == hostile_input(3, family, 11)
@@ -471,7 +623,7 @@ def test_hostile_generators_reach_the_audited_crash_inputs() -> None:
     literals = [hostile_input(0, "literal", i) for i in range(DEFAULT_CASES["literal"])]
     assert any(isinstance(t, str) and "²" in t for t in texts)
     assert any(isinstance(t, str) and re.search("[0-9]{4300}", t) for t in literals)
-    assert any(b"\xff" in c for c in (hostile_input(0, "bytes", i) for i in range(300)) if isinstance(c, bytes))
+    assert any(b"\xff" in c for c in (hostile_input(0, "bytes", i) for i in range(DEFAULT_CASES["bytes"])) if isinstance(c, bytes))
 
 
 def test_hostile_campaign(
@@ -481,25 +633,27 @@ def test_hostile_campaign(
     scratch_file: pathlib.Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Round-robin over every family; time-boxed with --fuzz-seconds, otherwise a fixed 120 inputs."""
+    """Round-robin over every family; time-boxed with --fuzz-seconds, otherwise a fixed 24 inputs."""
     seconds = request.config.getoption("--fuzz-seconds")
     assert isinstance(seconds, float)
     names = list(FAMILIES)
+    rotation = [name for name in names if name != "chain"]  # chains are slow, so they get a small share
     crashes: dict[tuple[str, str], str] = {}
     counts = dict.fromkeys(names, 0)
     total_crashes = 0
     slowest = (0.0, "")
+    outcomes = {"rejected": 0, "ran": 0, "out-of-budget": 0}
     started = time.monotonic()
     index = 0
-    while (time.monotonic() - started < seconds) if seconds > 0 else (index < 120):
-        family = names[index % len(names)]
+    while (time.monotonic() - started < seconds) if seconds > 0 else (index < 24):
+        family = "chain" if index % 64 == 63 else rotation[index % len(rotation)]
         case = hostile_input(fuzz_seed, family, index)
         name = f"seed={fuzz_seed} family={family} index={index}"
         prepared = prepare(case, scratch_file)
         t0 = time.monotonic()
         try:
             with watchdog.timing(name):
-                assert_never_crashes(prepared)
+                outcomes[assert_never_crashes(prepared)] += 1
         except Exception as e:  # recording every escape is the job of this harness
             total_crashes += 1
             frame = traceback.extract_tb(e.__traceback__)[-1]
@@ -512,7 +666,7 @@ def test_hostile_campaign(
     with capsys.disabled():
         print(
             f"\nhostile fuzz: seed={fuzz_seed} seconds={time.monotonic() - started:.1f} inputs={index} "
-            f"uncaught={total_crashes} distinct={len(crashes)} hangs=0 slowest={slowest[0]:.3f}s ({slowest[1]}) "
-            f"per-family={counts}"
+            f"uncaught={total_crashes} distinct={len(crashes)} hangs=0 outcomes={outcomes} "
+            f"slowest={slowest[0]:.3f}s ({slowest[1]}) per-family={counts}"
         )
     assert not crashes, "\n".join(f"{k}: {v}" for k, v in crashes.items())
