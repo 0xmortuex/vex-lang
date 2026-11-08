@@ -92,6 +92,14 @@ each frame's saved program counter and the instruction span table. The CLI print
 the failing source line with a caret and "in <function> at file:line:col" for each frame
 (long traces are elided in the middle). Process exit codes: 2 for a runtime error.
 
+## Allocation limits
+
+A `Str` built by one operation is limited to 50,000,000 characters and a `List` built by one operation to
+10,000,000 elements. `repeat`, `replace`, `join`, `+`, interpolation, `Range.to_list`, `chars`, `split`,
+`concat`, `extend` and the text of `print` / `eprint` stop the program with a runtime error instead of
+exceeding them, and `io.read_file` returns `Err`. Reaching them by repeated `push` is not checked; running
+out of memory there is a runtime error like any other (see above).
+
 ## Performance notes
 
 The VM is a plain `while True:` dispatch loop in CPython, ordered so hot instructions are tested

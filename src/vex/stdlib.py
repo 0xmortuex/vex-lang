@@ -9,6 +9,7 @@ import sys
 from collections.abc import Callable
 from typing import Any
 
+from vex import runtime
 from vex import syntax as ast
 from vex.diagnostics import DiagSink, Source, first_undecodable
 from vex.parser import Parser
@@ -103,6 +104,16 @@ def checked(r: int, what: str) -> int:
     if r > INT_MAX or r < INT_MIN:
         raise VexPanic(f"integer overflow in `{what}`")
     return r
+
+
+def _check_str(n: int) -> None:
+    if n > runtime.MAX_STR_LEN:
+        raise VexPanic("string too large")
+
+
+def _check_list(n: int) -> None:
+    if n > runtime.MAX_LIST_LEN:
+        raise VexPanic(f"list too large ({n} elements, the limit is {runtime.MAX_LIST_LEN})")
 
 
 # ------------------------------------------------------------------ global functions
@@ -228,19 +239,27 @@ def _str_slice(s: str, a: int, b: int) -> str:
 def _replace(s: str, a: str, b: str) -> str:
     if a == "":
         raise VexPanic("`replace` pattern must not be empty")
+    _check_str(len(s) + s.count(a) * (len(b) - len(a)))
     return s.replace(a, b)
 
 
 def _repeat(s: str, n: int) -> str:
     if n < 0:
         raise VexPanic("negative repeat count")
-    if len(s) * n > 50_000_000:
-        raise VexPanic("string too large")
+    _check_str(len(s) * n)
     return s * n
 
 
+def _chars(s: str) -> list[str]:
+    _check_list(len(s))
+    return list(s)
+
+
 def _split(s: str, sep: str) -> list[str]:
-    return list(s) if sep == "" else s.split(sep)
+    if sep == "":
+        return _chars(s)
+    _check_list(s.count(sep) + 1)
+    return s.split(sep)
 
 
 def _char_at(s: str, i: int) -> Any:
@@ -269,7 +288,7 @@ method("Str", "ends_with", "(Str, Str) -> Bool", str.endswith)
 method("Str", "replace", "(Str, Str, Str) -> Str", _replace)
 method("Str", "split", "(Str, Str) -> List[Str]", _split)
 method("Str", "lines", "(Str) -> List[Str]", str.splitlines)
-method("Str", "chars", "(Str) -> List[Str]", list)
+method("Str", "chars", "(Str) -> List[Str]", _chars)
 method("Str", "repeat", "(Str, Int) -> Str", _repeat)
 method("Str", "to_int", "(Str) -> Option[Int]", _str_to_int)
 method("Str", "to_float", "(Str) -> Option[Float]", _str_to_float)
@@ -340,7 +359,18 @@ def _sum_float(xs: list[float]) -> float:
 
 
 def _join(xs: list[str], sep: str) -> str:
+    _check_str(sum(map(len, xs)) + len(sep) * max(len(xs) - 1, 0))
     return sep.join(xs)
+
+
+def _concat(xs: list[Any], ys: list[Any]) -> list[Any]:
+    _check_list(len(xs) + len(ys))
+    return xs + ys
+
+
+def _extend(xs: list[Any], ys: list[Any]) -> None:
+    _check_list(len(xs) + len(ys))
+    xs.extend(ys)
 
 
 def _first(xs: list[Any]) -> Any:
@@ -363,7 +393,7 @@ method("List", "pop", "[T](List[T]) -> Option[T]", _pop, mutates=True)
 method("List", "insert", "[T](List[T], Int, T)", _insert, mutates=True)
 method("List", "remove_at", "[T](List[T], Int) -> T", _remove_at, mutates=True)
 method("List", "clear", "[T](List[T])", lambda xs: xs.clear(), mutates=True)
-method("List", "extend", "[T](List[T], List[T])", lambda xs, ys: xs.extend(ys), mutates=True)
+method("List", "extend", "[T](List[T], List[T])", _extend, mutates=True)
 method("List", "reverse", "[T](List[T])", lambda xs: xs.reverse(), mutates=True)
 method("List", "sort", "[T: Ord](List[T])", lambda xs: xs.sort(), mutates=True)
 method("List", "sorted", "[T: Ord](List[T]) -> List[T]", sorted)
@@ -373,7 +403,7 @@ method("List", "last", "[T](List[T]) -> Option[T]", _last)
 method("List", "contains", "[T: Eq](List[T], T) -> Bool", lambda xs, x: x in xs)
 method("List", "index_of", "[T: Eq](List[T], T) -> Option[Int]", _index_of_list)
 method("List", "slice", "[T](List[T], Int, Int) -> List[T]", _list_slice)
-method("List", "concat", "[T](List[T], List[T]) -> List[T]", lambda xs, ys: xs + ys)
+method("List", "concat", "[T](List[T], List[T]) -> List[T]", _concat)
 method("List", "copy", "[T](List[T]) -> List[T]", list)
 method("List", "map", "[T, U](List[T], fn(T) -> U) -> List[U]",
        lambda vm, xs, f: [vm.call(f, [x]) for x in list(xs)], needs_vm=True)  # fmt: skip
@@ -475,7 +505,12 @@ def _range_len(r: range) -> int:
     return checked(max(r.stop - r.start, 0), "len")  # len(r) raises OverflowError past sys.maxsize
 
 
-method("Range", "to_list", "(Range) -> List[Int]", list)
+def _to_list(r: range) -> list[int]:
+    _check_list(max(r.stop - r.start, 0))
+    return list(r)
+
+
+method("Range", "to_list", "(Range) -> List[Int]", _to_list)
 method("Range", "len", "(Range) -> Int", _range_len)
 method("Range", "contains", "(Range, Int) -> Bool", lambda r, x: x in r)
 
@@ -534,7 +569,8 @@ def _file_error(path: str, e: Exception) -> Any:
 def _read_file(path: str) -> Any:
     try:
         with open(path, encoding="utf-8") as fh:
-            return ok(fh.read())
+            text = fh.read(runtime.MAX_STR_LEN + 1)
+        return err(f"{path}: file too large") if len(text) > runtime.MAX_STR_LEN else ok(text)
     except (OSError, ValueError) as e:  # ValueError: undecodable contents, or a path holding a NUL
         return _file_error(path, e)
 
@@ -552,11 +588,13 @@ def _read_line() -> Any:
     if sys.stdin is None:  # started with stdin closed: there is nothing to read
         return NONE
     try:
-        line = sys.stdin.readline()
+        line = sys.stdin.readline(runtime.MAX_STR_LEN + 1)
     except UnicodeDecodeError:
         raise VexPanic("standard input is not valid UTF-8") from None
     except (OSError, ValueError) as e:
         raise VexPanic(f"cannot read standard input: {e}") from None
+    if len(line.rstrip("\r\n")) > runtime.MAX_STR_LEN:
+        raise VexPanic("input line too long")
     if first_undecodable(line) is not None:
         raise VexPanic("standard input is not valid UTF-8")
     return NONE if line == "" else some(line.rstrip("\r\n"))

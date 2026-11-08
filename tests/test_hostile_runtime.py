@@ -9,9 +9,9 @@ import time
 from typing import Any
 
 import pytest
-from helpers import run_body
+from helpers import run_body, run_source
 
-from vex import cli, stdlib
+from vex import cli, runtime, stdlib
 from vex.api import compile_text
 from vex.diagnostics import VexRuntimeError
 from vex.vm import VM
@@ -20,16 +20,16 @@ MIN = "(0 - 9223372036854775807 - 1)"
 MAX = "9223372036854775807"
 
 
-def panics(body: str, fragment: str) -> VexRuntimeError:
-    """``body`` is one line (line 2 of the program); it must stop with a Vex error located there."""
+def panics(body: str, fragment: str, prelude: str = "") -> VexRuntimeError:
+    """``body`` is one line of ``main``; the program must stop with a Vex error located on that line."""
     with pytest.raises(VexRuntimeError) as info:
-        run_body(body)
+        run_source(prelude + "fn main() {\n" + body + "\n}\n")
     error = info.value
     assert fragment in error.message
     assert error.trace, "no stack trace"
     span = error.trace[0][1]
     assert span is not None, "no source location"
-    assert span.line == 2
+    assert span.line == prelude.count("\n") + 2
     assert "-->" in error.render()
     return error
 
@@ -327,3 +327,108 @@ def test_cli_repl_without_a_standard_stream_exits_cleanly(stream: str, monkeypat
 def test_cli_disasm_of_an_unreadable_file_is_a_diagnostic(capsys: pytest.CaptureFixture[str]) -> None:
     assert cli.main(["disasm", "no-such-file.vx"]) == cli.EXIT_COMPILE
     assert "cannot read no-such-file.vx" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------- nothing builds a value of unbounded size in one step
+@pytest.fixture
+def small_limits(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(runtime, "MAX_STR_LEN", 10)
+    monkeypatch.setattr(runtime, "MAX_LIST_LEN", 5)
+
+
+@pytest.mark.parametrize("rng", [f"0..{MAX}", f"{MIN}..{MAX}", f"0..={MAX}"])
+def test_to_list_of_a_huge_range_never_allocates(rng: str) -> None:
+    started = time.monotonic()
+    panics(f"print(({rng}).to_list());", "list too large")
+    assert time.monotonic() - started < 2.0
+
+
+def test_chars_of_a_long_string_is_refused_before_allocating(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(runtime, "MAX_LIST_LEN", 1000)
+    panics('print("x".repeat(1001).chars());', "list too large")
+    panics('print("x".repeat(1001).split(""));', "list too large")
+
+
+def test_a_replacement_that_multiplies_is_refused_before_allocating() -> None:
+    started = time.monotonic()
+    panics('print("a".repeat(1000000).replace("a", "b".repeat(1000000)));', "string too large")
+    assert time.monotonic() - started < 2.0
+
+
+@pytest.mark.usefixtures("small_limits")
+@pytest.mark.parametrize(
+    ("body", "fragment"),
+    [
+        ("print((0..6).to_list());", "list too large"),
+        ("print((0..=5).to_list());", "list too large"),
+        ('print("abcdef".chars());', "list too large"),
+        ('print("abcdef".split(""));', "list too large"),
+        ('print("a,b,c,d,e,f".split(","));', "list too large"),
+        ("print([1, 2, 3].concat([4, 5, 6]));", "list too large"),
+        ("let mut xs = [1, 2, 3]; xs.extend(xs); print(xs);", "list too large"),
+        ('print("a".repeat(11));', "string too large"),
+        ('print("aaaa".replace("a", "bbb"));', "string too large"),
+        ('print(["aaaa", "bbbb"].join("ccc"));', "string too large"),
+        ('let a = "aaaaaa"; print(a + a);', "string too large"),
+        ('let a = "aaaaaa"; let mut b = a; b += a; print(b);', "string too large"),
+        ('let a = "aaaaaa"; print("{a}{a}");', "string too large"),
+        ("print([1, 2, 3, 4, 5, 6]);", "too large to display"),
+        ('print("{[1, 2, 3, 4, 5, 6]}");', "too large to display"),
+        ("assert_eq([1, 2, 3, 4, 5, 6], [1, 2, 3, 4, 5, 7]);", "too large to display"),
+    ],
+)
+def test_limits_are_enforced_at_the_operation(body: str, fragment: str) -> None:
+    panics(body, fragment)
+
+
+@pytest.mark.usefixtures("small_limits")
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        ("print((0..5).to_list().len());", "5"),
+        ("print((0..=4).len());", "5"),
+        ('print("abcde".chars().len());', "5"),
+        ('print("a,b,c,d,e".split(",").len());', "5"),
+        ("print([1, 2].concat([3, 4, 5]).len());", "5"),
+        ('print("ab".repeat(5));', "ababababab"),
+        ('print("aaa".replace("a", "bbb"));', "bbbbbbbbb"),
+        ('print("aaaaaaaaaaaaaaaaaaaa".len());', "20"),
+        ('print("abcdefghijkl".replace("abc", ""));', "defghijkl"),
+        ('print(["aaaa", "bbb"].join("ccc"));', "aaaacccbbb"),
+        ('let a = "aaaaa"; print(a + a);', "aaaaaaaaaa"),
+        ('let a = "aaaaa"; print("{a}{a}");', "aaaaaaaaaa"),
+    ],
+)
+def test_limits_allow_exactly_the_limit(body: str, expected: str) -> None:
+    assert run_body(body) == expected + "\n"
+
+
+def test_exponential_sharing_stops_at_the_display_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(runtime, "MAX_STR_LEN", 1000)
+    prelude = "struct N { kids: List[N] }\n"
+    started = time.monotonic()
+    panics("let mut c = N { kids: [] }; for i in 0..60 { c = N { kids: [c, c] }; } print(c);", "too large to display", prelude)
+    assert time.monotonic() - started < 2.0
+
+
+def test_display_limit_is_charged_for_contents_not_nesting(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(runtime, "MAX_STR_LEN", 100)
+    deep = "[" * 40 + "1" + "]" * 40
+    assert run_body(f"print({deep});") == deep + "\n"
+
+
+@pytest.mark.usefixtures("small_limits")
+def test_read_file_over_the_limit_is_err(tmp_path: Any) -> None:
+    fits, over = tmp_path / "fits.txt", tmp_path / "over.txt"
+    fits.write_text("x" * 10, encoding="utf-8")
+    over.write_text("x" * 11, encoding="utf-8")
+    assert run_body(f'print(io.read_file("{fits.as_posix()}").unwrap().len());') == "10\n"
+    assert run_body(f'match io.read_file("{over.as_posix()}") {{ Ok(_) => print("ok"), Err(e) => print(e) }}').endswith("file too large\n")
+
+
+@pytest.mark.usefixtures("small_limits")
+def test_read_line_over_the_limit_is_a_located_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sys, "stdin", io.StringIO("x" * 11 + "\n"))
+    panics("print(io.read_line());", "input line too long")
+    monkeypatch.setattr(sys, "stdin", io.StringIO("x" * 9 + "\n"))
+    assert run_body("print(io.read_line().unwrap().len());") == "9\n"

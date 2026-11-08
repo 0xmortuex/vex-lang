@@ -7,6 +7,7 @@ import sys
 from typing import Any, TextIO
 
 from vex import bytecode as bc
+from vex import runtime
 from vex.bytecode import (
     ADD_F,
     ADD_I,
@@ -383,7 +384,10 @@ class VM:
                     stack[-1] = r
                 elif op == ADD_S:
                     b = pop()
-                    stack[-1] = stack[-1] + b
+                    a = stack[-1]
+                    if len(a) + len(b) > runtime.MAX_STR_LEN:
+                        raise VexPanic("string too large")
+                    stack[-1] = a + b
                 elif op == MAKE_LIST:
                     if arg:
                         items = stack[-arg:]
@@ -443,9 +447,11 @@ class VM:
                     hi = pop()
                     stack[-1] = range(stack[-1], hi + 1)
                 elif op == BUILD_STR:
-                    parts = stack[-arg:]
+                    parts = [p if type(p) is str else display(p) for p in stack[-arg:]]
                     del stack[-arg:]
-                    push("".join([p if type(p) is str else display(p) for p in parts]))
+                    if sum(map(len, parts)) > runtime.MAX_STR_LEN:
+                        raise VexPanic("string too large")
+                    push("".join(parts))
                 elif op == TRY:
                     v = stack[-1]
                     if v.tag == 1:

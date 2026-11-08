@@ -16,6 +16,11 @@ if TYPE_CHECKING:
 INT_MIN = -(2**63)
 INT_MAX = 2**63 - 1
 
+# The largest Str and List one operation may build. Allocating is the one thing a single VM instruction
+# can do without limit, so operations whose result is not bounded by their arguments' sizes check these first.
+MAX_STR_LEN = 50_000_000
+MAX_LIST_LEN = 10_000_000
+
 
 class VexPanic(Exception):
     """A runtime error raised by a builtin or the VM; the VM attaches the stack trace."""
@@ -118,36 +123,74 @@ def quote(s: str) -> str:
 
 def display(v: Any, top: bool = True) -> str:
     """Format a value the way ``print`` and string interpolation do."""
-    if v is None:
-        return "()"
-    t = type(v)
-    if t is str:
-        return v if top else quote(v)
-    if t is bool:
-        return "true" if v else "false"
-    if t is int:
-        return str(v)
-    if t is float:
-        return fmt_float(v)
-    if t is list:
-        return "[" + ", ".join(display(x, False) for x in v) + "]"
-    if t is tuple:
-        inner = ", ".join(display(x, False) for x in v)
-        return f"({inner},)" if len(v) == 1 else f"({inner})"
-    if t is dict:
-        return "{" + ", ".join(f"{display(k, False)}: {display(x, False)}" for k, x in v.items()) + "}"
-    if t is range:
-        return f"{v.start}..={v.stop - 1}" if v.stop > INT_MAX else f"{v.start}..{v.stop}"
-    if t is Adt:
-        info: AdtInfo = v.info
-        name: str = info.variants[v.tag]
+    if top and type(v) is str:
+        return v
+    return _Renderer().show(v)
+
+
+class _Renderer:
+    """Formats one value. Shared substructure can make the text exponentially longer than the value is big,
+    so it charges every piece against the string limit as it goes."""
+
+    def __init__(self) -> None:
+        self.left = MAX_STR_LEN
+
+    def charge(self, n: int) -> None:
+        self.left -= n
+        if self.left < 0:
+            raise VexPanic(f"value is too large to display (over {MAX_STR_LEN} characters)")
+
+    def scalar(self, text: str) -> str:
+        self.charge(len(text))
+        return text
+
+    def show(self, v: Any) -> str:  # noqa: C901 - one case per runtime representation
+        if v is None:
+            return self.scalar("()")
+        t = type(v)
+        if t is str:
+            return self.scalar(quote(v))
+        if t is bool:
+            return self.scalar("true" if v else "false")
+        if t is int:
+            return self.scalar(str(v))
+        if t is float:
+            return self.scalar(fmt_float(v))
+        if t is list:
+            self.charge(2 + _separators(len(v)))
+            return "[" + ", ".join([self.show(x) for x in v]) + "]"
+        if t is tuple:
+            self.charge(2 + _separators(len(v)) + (len(v) == 1))
+            inner = ", ".join([self.show(x) for x in v])
+            return f"({inner},)" if len(v) == 1 else f"({inner})"
+        if t is dict:
+            self.charge(2 + _separators(len(v)) + 2 * len(v))
+            return "{" + ", ".join([f"{self.show(k)}: {self.show(x)}" for k, x in v.items()]) + "}"
+        if t is range:
+            return self.scalar(f"{v.start}..={v.stop - 1}" if v.stop > INT_MAX else f"{v.start}..{v.stop}")
+        if t is Adt:
+            return self.adt(v)
+        return self.scalar(_show_other(v))
+
+    def adt(self, v: Adt) -> str:
+        info = v.info
+        name = info.variants[v.tag]
+        self.charge(len(name) + len(info.name) + 4 + 2 * len(v.f))
         if info.fields is not None:
             names = info.fields[v.tag]
-            body = ", ".join(f"{n}: {display(x, False)}" for n, x in zip(names, v.f))
+            body = ", ".join([f"{n}: {self.show(x)}" for n, x in zip(names, v.f)])
             return f"{info.name} {{ {body} }}" if names else info.name
         if not v.f:
             return name
-        return f"{name}({', '.join(display(x, False) for x in v.f)})"
+        return f"{name}({', '.join([self.show(x) for x in v.f])})"
+
+
+def _separators(n: int) -> int:
+    return 2 * max(n - 1, 0)
+
+
+def _show_other(v: Any) -> str:
+    t = type(v)
     if t is Closure:
         return f"<fn {v.code.name}>"
     if t is BuiltinFn:
