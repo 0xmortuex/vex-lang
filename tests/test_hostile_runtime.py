@@ -72,9 +72,9 @@ def test_to_char_rejects_what_is_not_a_scalar_value(code: int) -> None:
     panics(f"print(({code}).to_char());", "not a valid code point")
 
 
-@pytest.mark.parametrize(("code", "text"), [(0xD7FF, chr(0xD7FF)), (0xE000, chr(0xE000)), (0x10FFFF, chr(0x10FFFF))], ids=hex)
-def test_to_char_accepts_the_neighbouring_scalars(code: int, text: str) -> None:
-    assert run_body(f"print({code}.to_char());") == text + "\n"
+@pytest.mark.parametrize("code", [0xD7FF, 0xE000, 0x10FFFF], ids=hex)
+def test_to_char_accepts_the_neighbouring_scalars(code: int) -> None:
+    assert run_body(f"print({code}.to_char());") == chr(code) + "\n"
 
 
 def run_with_args(body: str, args: list[str]) -> str:
