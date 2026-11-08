@@ -344,7 +344,7 @@ def test_budget_is_status_4_and_host_continues(api: Api) -> None:
 
 
 def test_default_budget_stops_a_loop(api: Api) -> None:
-    assert DEFAULT_BUDGET == 10_000_000
+    assert DEFAULT_BUDGET == 5_000_000
     vm = api.open()
     assert api.table.budget(vm, 200_000) == OK
     api.load(vm, "fn spin() { while true { } }")

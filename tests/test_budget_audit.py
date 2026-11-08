@@ -325,7 +325,7 @@ def test_interpolation_charges_exactly_the_text_it_produces() -> None:
     h.budget(1_000_000)
     h.load("r.vx", 'fn go() { let s = "ab"; "x{s}y{s}".len() }')
     assert h.call("go", []) == 6
-    assert 1_000_000 - h.fuel_left() == 1 + 6  # the entry, then one unit per character of the result
+    assert 1_000_000 - h.fuel_left() == 1 + 4 + 6 + 2  # entry, one per part, one per character, and the `len` call
 
 
 def test_find_still_stops_at_its_first_match_for_free_setup() -> None:

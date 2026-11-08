@@ -263,7 +263,7 @@ def display(v: Any, top: bool = True, charge: Callable[[int], None] | None = Non
             spend(len(x))
             out.append(x if mode == _TOP else quote(x))
         elif t is list or t is tuple or t is dict:
-            spend(len(x))
+            spend((6 if t is dict else 3) * len(x))  # each element pushes two or more work items below
             _push_container(work, x, t)
         elif t is Adt:
             spend(len(x.f))
@@ -293,15 +293,30 @@ def _push_separated(work: list[tuple[Any, int]], items: list[list[tuple[Any, int
             work.append((", ", _TEXT))
 
 
+_SEPARATOR = (", ", _TEXT)
+_COLON = (": ", _TEXT)
+
+
 def _push_container(work: list[tuple[Any, int]], x: Any, t: type) -> None:
+    """Push the elements directly: a temporary list per element would use far more memory than was charged."""
     if t is dict:
         work.append(("}", _TEXT))
-        _push_separated(work, [[(k, _NESTED), (": ", _TEXT), (v, _NESTED)] for k, v in x.items()])
+        first = True
+        for k, v in reversed(x.items()):
+            if not first:
+                work.append(_SEPARATOR)
+            first = False
+            work.append((v, _NESTED))
+            work.append(_COLON)
+            work.append((k, _NESTED))
         work.append(("{", _TEXT))
         return
     closing = "]" if t is list else (",)" if len(x) == 1 else ")")
     work.append((closing, _TEXT))
-    _push_separated(work, [[(i, _NESTED)] for i in x])
+    for i in range(len(x) - 1, -1, -1):
+        work.append((x[i], _NESTED))
+        if i:
+            work.append(_SEPARATOR)
     work.append(("[" if t is list else "(", _TEXT))
 
 

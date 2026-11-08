@@ -206,7 +206,8 @@ Python's stdout is flushed after each `call` on an instance with bit 1. The host
 
 ## Execution budget
 
-A call may spend a fixed number of units; the default is 10,000,000. One unit is charged per function entry and loop back-edge.
+A call may spend a fixed number of units; the default is 5,000,000. A call to a function or closure charges `1 + locals` units
+and a loop back-edge charges one, so a function with no locals costs exactly one unit per entry.
 
 Work whose cost scales with data is charged one unit per character or element touched, before the work it pays for, in these places:
 
@@ -220,6 +221,10 @@ Work whose cost scales with data is charged one unit per character or element to
 - Map lookups and updates (`m[k]`, `m[k] = v`, `get`, `insert`, `remove`, `contains_key`, map literals) charge the size of the key.
 - Reading and writing through `io.*`, and a `Str` crossing the boundary in either direction, one unit per character.
 - `+` on `Str`.
+- Constructing a value, per operand built: a list, tuple or struct/enum literal costs `1 + fields`, a map literal `8 + 2 * pairs`,
+  a closure `2 + captures`, a captured-variable cell 1, an interpolation one per part. There are no pre-built array constants.
+- Every builtin call charges `1 + arguments`. `enumerate`, `zip` and `Map.entries` charge 3 per element and `chars` 2, since each
+  element is a new object; displaying a list charges 3 per element and a map 6.
 
 `List.push`, `List.clear` and `Map.clear` are constant or amortised: `push` is paid for by whatever loop makes the calls, and
 `clear` frees only what was charged when it was built. `tests/test_budget_audit.py` lists every builtin with its classification.
@@ -235,10 +240,19 @@ The exact memory guarantee is this. The budget is a work limit, not a memory cap
   peak of 1 MB of traced Python allocations, which is the script's own `s`.
 - Formatting a value (`display`) spends budget for each piece of text before it appends it. `io.read_file` and `io.read_line` read
   and charge in pieces of at most 64 KiB, so they can be at most one piece ahead of the budget.
-- Memory still grows with the units a script spends, at a rate fixed by CPython's object sizes, because one unit buys one
-  element or character. Measured peak traced allocations, per unit spent: 40 bytes for `(0..n).to_list()`, 66 for `.enumerate()`,
-  35 for `.chars()`, 24 for formatting a list, 2.5 for `.split`. Choose a budget with this in mind: the default of 10,000,000
-  units can reach roughly 700 MB at the worst rate above.
+- Memory grows with the units spent, at a rate set by CPython's object sizes. `tests/test_budget_opcodes.py` keeps the worst
+  retained rate under 40 bytes of traced Python allocation per unit, for every value-building opcode and builtin; the native rate
+  for the worst builder (`xs.push(Some(i))`) measured 31 bytes per unit.
+- At the default budget, the highest peak process memory measured across 16 adversarial scripts on Windows x86-64, CPython 3.13,
+  was **191 MB** of working set (187 MB committed), for a script that nests 99,000 calls and then retains `Some` values until the
+  budget stops it. That includes CPython itself: a script doing nothing peaks at 17-20 MB. Retaining values at the default without
+  recursion peaked at 171 MB; a retained wide literal (`[0, ... 1000 items]` pushed in a loop) at 59 MB.
+- That figure depends on more than the budget, because three things are not charged by the unit: the compiled script (bytecode and
+  constants, proportional to script text, which the host supplies), nested call frames (at most 100,000, about 300 bytes each plus
+  the locals they charged, a fixed ceiling independent of budget), and CPython itself, which the 191 MB includes. Time per unit
+  also depends on script size: one unit covers one loop back-edge or call, so it can run up to the longest straight-line stretch of
+  instructions in that script. A host that wants a tighter bound sets a lower budget with `budget`; the memory bound scales with it
+  and the rest stays fixed.
 
 ## Values that contain themselves
 

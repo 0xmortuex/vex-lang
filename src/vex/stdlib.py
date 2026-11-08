@@ -100,11 +100,14 @@ def const(space: str, name: str, ty: Type, value: Any) -> None:
     NAMESPACES[space][name] = Builtin(f"{space}.{name}", [], ty, None, value=value, is_const=True)
 
 
-def _by_input(impl: Callable[..., Any]) -> Callable[..., Any]:
-    """Charge the size of a builtin's text and collection arguments before it runs (``needs_vm=True``)."""
+def _by_input(impl: Callable[..., Any], factor: int = 1) -> Callable[..., Any]:
+    """Charge the size of a builtin's text and collection arguments before it runs (``needs_vm=True``).
+
+    A builder that makes a new object per element passes a higher ``factor``, so a unit buys the same memory everywhere.
+    """
 
     def go(vm: Any, *args: Any) -> Any:
-        vm.charge(sum(len(a) for a in args if type(a) in (str, list, dict)))
+        vm.charge(factor * sum(len(a) for a in args if type(a) in (str, list, dict)))
         return impl(*args)
 
     return go
@@ -289,7 +292,7 @@ method("Str", "ends_with", "(Str, Str) -> Bool", _by_input(str.endswith), needs_
 method("Str", "replace", "(Str, Str, Str) -> Str", _replace, needs_vm=True)
 method("Str", "split", "(Str, Str) -> List[Str]", _by_input(_split), needs_vm=True)
 method("Str", "lines", "(Str) -> List[Str]", _by_input(str.splitlines), needs_vm=True)
-method("Str", "chars", "(Str) -> List[Str]", _by_input(list), needs_vm=True)
+method("Str", "chars", "(Str) -> List[Str]", _by_input(list, factor=2), needs_vm=True)
 method("Str", "repeat", "(Str, Int) -> Str", _repeat, needs_vm=True)
 method("Str", "to_int", "(Str) -> Option[Int]", _by_input(_str_to_int), needs_vm=True)
 method("Str", "to_float", "(Str) -> Option[Float]", _by_input(_str_to_float), needs_vm=True)
@@ -440,8 +443,8 @@ method("List", "all", "[T](List[T], fn(T) -> Bool) -> Bool",
        lambda vm, xs, f: all(vm.call(f, [x]) for x in _snapshot(vm, xs)), needs_vm=True)  # fmt: skip
 method("List", "find", "[T](List[T], fn(T) -> Bool) -> Option[T]", _find, needs_vm=True)
 method("List", "for_each", "[T](List[T], fn(T) -> Unit)", _for_each, needs_vm=True)
-method("List", "enumerate", "[T](List[T]) -> List[(Int, T)]", _by_input(lambda xs: list(enumerate(xs))), needs_vm=True)
-method("List", "zip", "[T, U](List[T], List[U]) -> List[(T, U)]", _by_input(lambda xs, ys: list(zip(xs, ys))), needs_vm=True)
+method("List", "enumerate", "[T](List[T]) -> List[(Int, T)]", _by_input(lambda xs: list(enumerate(xs)), factor=3), needs_vm=True)
+method("List", "zip", "[T, U](List[T], List[U]) -> List[(T, U)]", _by_input(lambda xs, ys: list(zip(xs, ys)), factor=3), needs_vm=True)
 method("List", "sum", "(List[Int]) -> Int", _by_input(_sum), needs_vm=True)
 method("List", "sum_float", "(List[Float]) -> Float", _by_input(lambda xs: math.fsum(xs)), needs_vm=True)
 method("List", "join", "(List[Str], Str) -> Str", _join, needs_vm=True)
@@ -465,7 +468,7 @@ method("Map", "clear", "[K, V](Map[K, V])", lambda m: m.clear(), mutates=True)
 method("Map", "contains_key", "[K, V](Map[K, V], K) -> Bool", _by_key(lambda m, k: k in m), needs_vm=True)
 method("Map", "keys", "[K, V](Map[K, V]) -> List[K]", _by_input(lambda m: list(m.keys())), needs_vm=True)
 method("Map", "values", "[K, V](Map[K, V]) -> List[V]", _by_input(lambda m: list(m.values())), needs_vm=True)
-method("Map", "entries", "[K, V](Map[K, V]) -> List[(K, V)]", _by_input(lambda m: list(m.items())), needs_vm=True)
+method("Map", "entries", "[K, V](Map[K, V]) -> List[(K, V)]", _by_input(lambda m: list(m.items()), factor=3), needs_vm=True)
 
 
 # ------------------------------------------------------------------ Option / Result

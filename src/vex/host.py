@@ -30,7 +30,7 @@ CAP_WRITE = 4
 CAP_ENV = 8
 CAP_ALL = CAP_PRINT | CAP_READ | CAP_WRITE | CAP_ENV
 
-DEFAULT_BUDGET = 10_000_000
+DEFAULT_BUDGET = 5_000_000
 
 # Each host re-entry (script to host to script) nests native and interpreter frames on one OS thread.
 # The limit is process-wide, so chains across instances count too, and keeps that well inside the 1 MiB

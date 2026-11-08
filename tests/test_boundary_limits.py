@@ -302,7 +302,7 @@ def test_budget_stop_at_the_entry_of_a_reentrant_call_is_located() -> None:
             rendered.append(e.render())
             raise
 
-    h.budget(1)
+    h.budget(2)  # the outer entry and the call to the host function; the inner entry cannot be paid for
     h.bind("again", "()", again)
     h.load("e.vx", "fn inner() { 1 }\nfn go() { host.again(); }")
     with pytest.raises(VexBudgetError):

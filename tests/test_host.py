@@ -433,7 +433,7 @@ def test_infinite_loop_stops_at_the_budget_with_a_location() -> None:
 
 
 def test_default_budget() -> None:
-    assert DEFAULT_BUDGET == 10_000_000
+    assert DEFAULT_BUDGET == 5_000_000
     assert Host()._budget == DEFAULT_BUDGET
 
 

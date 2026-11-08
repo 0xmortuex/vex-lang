@@ -99,6 +99,9 @@ BUDGET_MESSAGE = "execution budget exhausted"
 # Each level of a builtin calling back into Vex costs at most about 5 Python frames. In an embedding this cap,
 # with the host re-entry cap, keeps every callback from native code well inside Python's recursion limit.
 MAX_CALLBACK_DEPTH = 100
+# A closure and an empty map are several Python objects: charged here so their memory stays within a unit's rate.
+CLOSURE_COST = 2
+MAP_BASE_COST = 8
 _FLAT = frozenset({int, float, bool, type(None)})
 _DONE = object()
 
@@ -149,7 +152,7 @@ class VM:
 
     def call(self, f: Any, args: list[Any]) -> Any:
         """Call a Vex function value from Python (used by higher-order builtins)."""
-        self.charge(1)
+        self.charge(1 + (f.code.nlocals if type(f) is Closure else len(args)))
         if self.embedded and VM.callback_depth >= MAX_CALLBACK_DEPTH:
             raise VexPanic(f"recursion through builtins is too deep (more than {MAX_CALLBACK_DEPTH} levels)")
         VM.callback_depth += 1
@@ -235,7 +238,7 @@ class VM:
                     locals_[arg] = pop()
                 elif op == CALL_FN:
                     fcode, n = arg
-                    self.fuel -= 1
+                    self.fuel -= 1 + fcode.nlocals
                     if self.fuel < 0:
                         raise VexBudgetExceeded(BUDGET_MESSAGE)
                     if len(frames) >= MAX_DEPTH:
@@ -373,6 +376,7 @@ class VM:
                 elif op == STORE_CELL:
                     locals_[arg].v = pop()
                 elif op == MAKE_CELL:
+                    self.charge(1)
                     locals_[arg] = Cell(locals_[arg])
                 elif op == CALL:
                     n = arg
@@ -384,7 +388,7 @@ class VM:
                         args = []
                     pop()
                     if type(f) is Closure:
-                        self.fuel -= 1
+                        self.fuel -= 1 + f.code.nlocals
                         if self.fuel < 0:
                             raise VexBudgetExceeded(BUDGET_MESSAGE)
                         if len(frames) >= MAX_DEPTH:
@@ -401,6 +405,7 @@ class VM:
                         if pad > 0:
                             locals_ = locals_ + [None] * pad
                     else:
+                        self.charge(1 + n)
                         if f.needs_vm:
                             frames.append((code, pc, locals_, stack))
                             r = f.fn(self, *args)
@@ -410,6 +415,7 @@ class VM:
                         push(r)
                 elif op == CALL_BI:
                     impl, n = arg
+                    self.charge(1 + n)
                     if n:
                         args = stack[-n:]
                         del stack[-n:]
@@ -418,6 +424,7 @@ class VM:
                         push(impl())
                 elif op == CALL_BIV:
                     impl, n = arg
+                    self.charge(1 + n)
                     if n:
                         args = stack[-n:]
                         del stack[-n:]
@@ -429,6 +436,7 @@ class VM:
                     push(r)
                 elif op == MAKE_ADT:
                     info, tag, n = arg
+                    self.charge(1 + n)
                     if n:
                         fields = stack[-n:]
                         del stack[-n:]
@@ -466,6 +474,7 @@ class VM:
                     self.charge(len(stack[-1]) + len(b))
                     stack[-1] = stack[-1] + b
                 elif op == MAKE_LIST:
+                    self.charge(1 + arg)
                     if arg:
                         items = stack[-arg:]
                         del stack[-arg:]
@@ -473,10 +482,12 @@ class VM:
                         items = []
                     push(items)
                 elif op == MAKE_TUPLE:
+                    self.charge(1 + arg)
                     items = stack[-arg:]
                     del stack[-arg:]
                     push(tuple(items))
                 elif op == MAKE_MAP:
+                    self.charge(MAP_BASE_COST + 2 * arg)
                     n2 = arg * 2
                     flat = stack[-n2:] if n2 else []
                     if n2:
@@ -529,6 +540,7 @@ class VM:
                     hi = pop()
                     stack[-1] = range(stack[-1], hi + 1)
                 elif op == BUILD_STR:
+                    self.charge(arg)
                     parts = stack[-arg:]
                     del stack[-arg:]
                     pieces: list[str] = []
@@ -551,6 +563,7 @@ class VM:
                         stack[-1] = v.f[0]
                 elif op == MAKE_CLOSURE:
                     fcode, k = arg
+                    self.charge(CLOSURE_COST + k)
                     if k:
                         cap = stack[-k:]
                         del stack[-k:]
