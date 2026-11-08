@@ -333,8 +333,8 @@ Rules that make this hold:
   would in any Mort program.
 
 **Budget.** One unit per function entry and loop back-edge, plus per-element charges for building values and data-sized
-builtins (`docs/ffi.md`), reset at each outermost `call`, default 5,000,000. There is no hard heap cap in version 1: the measured
-worst case at the default is in `docs/ffi.md`.
+builtins (`docs/ffi.md`), reset at each outermost `call`, default 5,000,000. The budget bounds work, not memory: there is no
+heap cap in version 1, and the budget is not a sandbox (non-goal 5). Measurements, which depend on value shape, are in `docs/ffi.md`.
 
 **Threads and re-entry.** One instance family, one OS thread: the thread that ran `Py_Initialize`, which keeps the GIL. A call
 from another thread deadlocks and is unsupported. Re-entry on that thread (Mort to Vex to Mort to Vex) is supported and shares

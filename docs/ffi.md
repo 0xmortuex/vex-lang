@@ -222,7 +222,8 @@ Work whose cost scales with data is charged one unit per character or element to
 - Reading and writing through `io.*`, and a `Str` crossing the boundary in either direction, one unit per character.
 - `+` on `Str`.
 - Constructing a value, per operand built: a list, tuple or struct/enum literal costs `1 + fields`, a map literal `8 + 2 * pairs`,
-  a closure `2 + captures`, a captured-variable cell 1, an interpolation one per part. There are no pre-built array constants.
+  a closure `2 + captures`, a captured-variable cell 1, an interpolation one per part, a range 4 (none for a range written directly
+  as a `for` head, which the loop alone holds). There are no pre-built array constants.
 - Every builtin call charges `1 + arguments`. `enumerate`, `zip` and `Map.entries` charge 3 per element and `chars` 2, since each
   element is a new object; displaying a list charges 3 per element and a map 6.
 
@@ -231,7 +232,12 @@ Work whose cost scales with data is charged one unit per character or element to
 
 The budget resets at each outermost `call`. When it runs out, the script stops with status 4 at its current location.
 
-The exact memory guarantee is this. The budget is a work limit, not a memory cap, and it has no hard memory cap in version 1.
+**The budget bounds work, not memory.** There is no memory cap in version 1 and no figure below is a guarantee. The budget is a
+safety net that stops a buggy script from running forever; it is not a sandbox, and containing a hostile script is out of scope
+(`DECISIONS.md`, non-goal 5). A host that must limit memory needs an operating-system limit around the process. A lower `budget`
+also reduces how much a script can allocate, but no fixed relation between units and bytes holds.
+
+What is known about allocation:
 
 - A result whose size is known is paid for before it is allocated: `repeat`, `join`, `+`, `to_list`, `concat` and the like. A
   budget stop leaves nothing allocated for that result.
@@ -240,19 +246,30 @@ The exact memory guarantee is this. The budget is a work limit, not a memory cap
   peak of 1 MB of traced Python allocations, which is the script's own `s`.
 - Formatting a value (`display`) spends budget for each piece of text before it appends it. `io.read_file` and `io.read_line` read
   and charge in pieces of at most 64 KiB, so they can be at most one piece ahead of the budget.
-- Memory grows with the units spent, at a rate set by CPython's object sizes. `tests/test_budget_opcodes.py` keeps the worst
-  retained rate under 40 bytes of traced Python allocation per unit, for every value-building opcode and builtin; the native rate
-  for the worst builder (`xs.push(Some(i))`) measured 31 bytes per unit.
-- At the default budget, the highest peak process memory measured across 16 adversarial scripts on Windows x86-64, CPython 3.13,
-  was **191 MB** of working set (187 MB committed), for a script that nests 99,000 calls and then retains `Some` values until the
-  budget stops it. That includes CPython itself: a script doing nothing peaks at 17-20 MB. Retaining values at the default without
-  recursion peaked at 171 MB; a retained wide literal (`[0, ... 1000 items]` pushed in a loop) at 59 MB.
-- That figure depends on more than the budget, because three things are not charged by the unit: the compiled script (bytecode and
-  constants, proportional to script text, which the host supplies), nested call frames (at most 100,000, about 300 bytes each plus
-  the locals they charged, a fixed ceiling independent of budget), and CPython itself, which the 191 MB includes. Time per unit
-  also depends on script size: one unit covers one loop back-edge or call, so it can run up to the longest straight-line stretch of
-  instructions in that script. A host that wants a tighter bound sets a lower budget with `budget`; the memory bound scales with it
-  and the rest stays fixed.
+- Memory depends on the shape of the values a script keeps, not only on the units it spends. `tests/test_budget_opcodes.py` holds
+  a set of ordinary shapes under 40 bytes of traced Python allocation per unit. That is a regression check on those shapes, not a
+  limit for all scripts: see the enum row below, which is about 70 bytes per unit.
+- Some memory is not charged at all: the compiled script (proportional to the text the host supplies), CPython itself, call
+  frames, and operands waiting on the stack. Operands a call is still building are retained for as long as the call is nested, so
+  memory for deep recursion scales with the width of the expression around the call. Frames are limited to 100,000 by count, not
+  by size.
+
+Peak working set of a Mort host running one script at the default budget of 5,000,000 (Windows x86-64, CPython 3.13). These are
+measurements of these scripts, not an upper bound; a script of another shape can use more.
+
+| Script | Peak | Stopped by |
+|--------|-----:|------------|
+| `fn f() -> Int { 0 }` | 27 MB | returns |
+| `fn r(n) { [0, ... 500 items, r(n + 1)][0] }` | 487 MB | stack limit (status 2) |
+| `xs.push([E.A, ... 1000 items])` in a loop | 353 MB | budget |
+| `a = Cons(i + 1, a)` in a loop | 237 MB | budget |
+| `xs.push([i + 1000, ... 1000 items])` in a loop | 220 MB | budget |
+| `(0..4999000).to_list()` | 218 MB | returns |
+| `xs.push(Some(i))` in a loop | 174 MB | budget |
+| `xs.push([0..=i, ... 1000 items])` in a loop | 143 MB | budget |
+
+Time per unit also depends on script size: one unit covers one loop back-edge or call, so it can run up to the longest
+straight-line stretch of instructions in that script.
 
 ## Values that contain themselves
 
@@ -281,7 +298,7 @@ before any of its code runs:
 
 | Limit | Value | Bounds |
 |-------|------:|--------|
-| Calls into Vex nested through host functions | 32 | Native stack: measured 1 MiB safe to 142 hops, on Windows x86-64 |
+| Calls into Vex nested through host functions | 32 | Native stack |
 | Builtins calling back into Vex (`map` inside `map`) | 100 | Python recursion, keeping callback headroom |
 
 Ordinary Vex-to-Vex recursion is not limited by these; it uses a heap-allocated frame stack limited to 100,000 frames.
