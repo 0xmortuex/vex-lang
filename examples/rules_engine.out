@@ -1,0 +1,15 @@
+ada (3 x $19.99)
+  member: 5997 -> 5698
+  minimum charge: 5698 -> 5698
+  total $56.98
+acme (250 x $1.20)
+  bulk: 30000 -> 27000
+  partner: 27000 -> 22950
+  coupon: 22950 -> 22450
+  minimum charge: 22450 -> 22450
+  total $224.50
+tiny (1 x $0.05)
+  minimum charge: 5 -> 100
+  total $1.00
+blocked-mallory (500 x $9.00)
+  rejected by embargo: customer is blocked

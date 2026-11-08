@@ -1,0 +1,109 @@
+// A rules engine: discount policy written as data, the way a host program would let
+// its users change behaviour without a compiler. Each rule is a named condition plus an
+// effect, the rules run in order, and an audit trail says exactly why a price came out.
+
+struct Order {
+    customer: Str,
+    tier: Tier,
+    quantity: Int,
+    unit_cents: Int,
+    coupon: Option[Str],
+}
+
+enum Tier { Guest, Member, Partner }
+
+enum Effect {
+    PercentOff(Int),
+    CentsOff(Int),
+    FloorAt(Int),
+    Reject(Str),
+}
+
+struct Rule {
+    name: Str,
+    applies: fn(Order) -> Bool,
+    effect: Effect,
+}
+
+enum Outcome {
+    Priced(Int, List[Str]),
+    Rejected(Str, Str),
+}
+
+fn apply_effect(cents: Int, effect: Effect) -> Result[Int, Str] {
+    match effect {
+        Effect.PercentOff(p) if p < 0 || p > 100 => Err("bad percentage {p}"),
+        Effect.PercentOff(p) => Ok(cents - cents * p / 100),
+        Effect.CentsOff(c) => Ok((cents - c).max(0)),
+        Effect.FloorAt(c) => Ok(cents.max(c)),
+        Effect.Reject(why) => Err(why),
+    }
+}
+
+fn evaluate(rules: List[Rule], order: Order) -> Outcome {
+    let mut cents = order.quantity * order.unit_cents;
+    let mut trail: List[Str] = [];
+    for rule in rules {
+        if !(rule.applies)(order) { continue; }
+        match apply_effect(cents, rule.effect) {
+            Ok(next) => {
+                trail.push("{rule.name}: {cents} -> {next}");
+                cents = next;
+            }
+            Err(why) => return Outcome.Rejected(rule.name, why),
+        }
+    }
+    Outcome.Priced(cents, trail)
+}
+
+fn policy() -> List[Rule] {
+    [
+        Rule {
+            name: "embargo",
+            applies: |o| o.customer.starts_with("blocked-"),
+            effect: Effect.Reject("customer is blocked"),
+        },
+        Rule { name: "bulk", applies: |o| o.quantity >= 100, effect: Effect.PercentOff(10) },
+        Rule {
+            name: "partner",
+            applies: |o| match o.tier { Tier.Partner => true, _ => false },
+            effect: Effect.PercentOff(15),
+        },
+        Rule {
+            name: "member",
+            applies: |o| match o.tier { Tier.Member => true, _ => false },
+            effect: Effect.PercentOff(5),
+        },
+        Rule {
+            name: "coupon",
+            applies: |o| o.coupon == Some("SAVE500"),
+            effect: Effect.CentsOff(500),
+        },
+        Rule { name: "minimum charge", applies: |o| true, effect: Effect.FloorAt(100) },
+    ]
+}
+
+fn show_cents(cents: Int) -> Str {
+    let frac = cents % 100;
+    let pad = if frac < 10 { "0" } else { "" };
+    "${cents / 100}.{pad}{frac}"
+}
+
+fn report(rules: List[Rule], order: Order) {
+    print("{order.customer} ({order.quantity} x {show_cents(order.unit_cents)})");
+    match evaluate(rules, order) {
+        Outcome.Priced(cents, trail) => {
+            for step in trail { print("  {step}"); }
+            print("  total {show_cents(cents)}");
+        }
+        Outcome.Rejected(rule, why) => print("  rejected by {rule}: {why}"),
+    }
+}
+
+fn main() {
+    let rules = policy();
+    report(rules, Order { customer: "ada", tier: Tier.Member, quantity: 3, unit_cents: 1999, coupon: None });
+    report(rules, Order { customer: "acme", tier: Tier.Partner, quantity: 250, unit_cents: 120, coupon: Some("SAVE500") });
+    report(rules, Order { customer: "tiny", tier: Tier.Guest, quantity: 1, unit_cents: 5, coupon: None });
+    report(rules, Order { customer: "blocked-mallory", tier: Tier.Partner, quantity: 500, unit_cents: 900, coupon: None });
+}

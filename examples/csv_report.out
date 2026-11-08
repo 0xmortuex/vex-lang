@@ -1,0 +1,8 @@
+region  orders  units  revenue   best seller
+north   3       6      178.97    sprocket
+south   2       11     124.40    widget
+total revenue: 303.37
+3 rows skipped
+  line 5: units `x` is not a number
+  line 7: expected 4 columns, found 2
+  line 9: units must not be negative

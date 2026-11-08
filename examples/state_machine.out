@@ -1,0 +1,18 @@
+happy path:
+  Assign("ada") -> Assigned("ada")
+  AskCustomer -> Waiting("ada", 0)
+  Tick -> Waiting("ada", 1)
+  CustomerReplied -> Assigned("ada")
+  Resolve -> Closed("resolved by ada")
+timeout:
+  Assign("alan") -> Assigned("alan")
+  AskCustomer -> Waiting("alan", 0)
+  Tick -> Waiting("alan", 1)
+  Tick -> Waiting("alan", 2)
+  Tick -> Closed("no reply")
+  Reopen -> Open
+invalid:
+  refused: cannot apply Resolve in state Open
+  refused: cannot apply AskCustomer in state Open
+  Assign("ada") -> Assigned("ada")
+  refused: cannot apply Reopen in state Assigned("ada")
