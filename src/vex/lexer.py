@@ -237,6 +237,10 @@ class Lexer:
                     buf = []
                 parts.append((self.pos + 1, close))
                 self.pos = close + 1
+            elif "\ud800" <= ch <= "\udfff":
+                self.error("unexpected-character", f"unexpected character {ch!r}", self.pos, self.pos + 1,
+                           "a lone surrogate is not a Unicode character")  # fmt: skip
+                self.pos += 1
             else:
                 buf.append(ch)
                 self.pos += 1
@@ -255,9 +259,10 @@ class Lexer:
             if self.pos + 1 < self.end and t[self.pos + 1] == "{":
                 close = t.find("}", self.pos)
                 digits = t[self.pos + 2 : close] if close != -1 else ""
-                try:
-                    buf.append(chr(int(digits, 16)))
-                except (ValueError, OverflowError):
+                code_point = _code_point(digits)
+                if code_point is not None:
+                    buf.append(chr(code_point))
+                else:
                     self.error("bad-escape", "invalid unicode escape", start, max(close, self.pos) + 1,
                                "expected `\\u{XXXX}` with a valid code point")  # fmt: skip
                 self.pos = (close if close != -1 else self.pos) + 1
@@ -291,6 +296,17 @@ class Lexer:
                     return i
             i += 1
         return -1
+
+
+def _code_point(digits: str) -> int | None:
+    """The Unicode scalar value written by ASCII hex ``digits``; None if they do not denote one."""
+    if not digits or any(c not in BASE_DIGITS[16] for c in digits):
+        return None
+    significant = digits.lstrip("0")
+    if len(significant) > 6:
+        return None
+    value = int(significant or "0", 16)
+    return None if value > 0x10FFFF or 0xD800 <= value <= 0xDFFF else value
 
 
 def tokenize(source: Source, sink: DiagSink) -> list[Token]:

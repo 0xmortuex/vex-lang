@@ -326,3 +326,33 @@ def test_finite_floats_at_the_edges_are_accepted(text: str, value: float) -> Non
     toks, sink = lex(text)
     assert not sink.items
     assert toks[0].kind == "FLOAT" and toks[0].value == value
+
+
+# ---------------------------------------------------------------- \u{...} escapes
+@pytest.mark.parametrize(
+    "escape",
+    [
+        r"\u{D800}", r"\u{DBFF}", r"\u{DC00}", r"\u{DFFF}", r"\u{d800}", r"\u{00D800}",
+        r"\u{110000}", r"\u{FFFFFF}", r"\u{" + "F" * 5000 + "}",
+        r"\u{" + "\u0664\u0661}", r"\u{0x41}", r"\u{+41}", r"\u{-41}", r"\u{4_1}", r"\u{ 41}", r"\u{41 }", r"\u{}", r"\u{G}",
+    ],
+)  # fmt: skip
+def test_invalid_unicode_escape_is_a_diagnostic(escape: str) -> None:
+    assert single_error('  "' + escape + '"') == ("bad-escape", 1, 4)
+
+
+@pytest.mark.parametrize(
+    ("escape", "char"),
+    [
+        (r"\u{41}", "A"), (r"\u{0041}", "A"), (r"\u{" + "0" * 5000 + "41}", "A"), (r"\u{e9}", "\u00e9"), (r"\u{E9}", "\u00e9"),
+        (r"\u{0}", "\0"), (r"\u{D7FF}", "\ud7ff"), (r"\u{E000}", "\ue000"), (r"\u{10FFFF}", "\U0010ffff"),
+    ],
+)  # fmt: skip
+def test_valid_unicode_escapes(escape: str, char: str) -> None:
+    toks, sink = lex('"' + escape + '"')
+    assert not sink.items
+    assert toks[0].value == [char]
+
+
+def test_raw_lone_surrogate_in_a_string_is_a_diagnostic() -> None:
+    assert single_error('"a\ud800b"') == ("unexpected-character", 1, 3)
