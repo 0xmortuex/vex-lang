@@ -180,10 +180,14 @@ class VM:
             VM.callback_depth -= 1
 
     def run_function(self, code: Code, args: list[Any] | None = None) -> Any:
-        """Run a top-level function to completion, converting failures to VexRuntimeError."""
-        args = args or []
-        locals_ = list(args) + [None] * (code.nlocals - len(args))
-        args = None  # locals_ holds them now, and must be the only thing that does when memory runs out
+        """Run a top-level function to completion, converting failures to VexRuntimeError.
+
+        Takes ownership of `args`: the list becomes the frame's locals, so the caller must not reuse it.
+        """
+        # Not a copy: Python 3.10 keeps a call's arguments on the caller's evaluation stack until it returns, so when
+        # memory runs out only emptying this very list can release the values in it.
+        locals_ = [] if args is None else args
+        locals_.extend([None] * (code.nlocals - len(locals_)))
         self._oom_code = None
         if self.reserve is None:
             try:
