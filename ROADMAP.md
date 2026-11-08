@@ -89,6 +89,9 @@ there is no direct path in either direction; Mort could only spawn `vex` as a su
 
 ### 1. `break` / `continue` inside an expression corrupt the operand stack
 
+- **Status: fixed on branch `fix/break-continue-in-expr`.** The forms stay valid, as `docs/types.md` types them
+  `Never`: the compiler tracks held operands and emits `POP`s down to the loop's entry depth before the jump.
+  Tests: `tests/test_break_in_expr.py`. The rest of this entry records the problem as audited.
 - **Missing:** Jumps do not unwind expression temporaries. `for` keeps its iterator on the same stack.
 - **Why it matters:** A well-typed program gets the wrong behaviour with no diagnostic. This is the only silent
   miscompile found, so it comes first.
@@ -255,3 +258,38 @@ Vex facts were measured here. Mort facts come from reading its `README.md`, `doc
 Native code through C, `extern fn` C interop, freestanding output and an OS kernel written in it, `resource` ownership, pointers, fixed-width integers, threads and sockets in its standard library, and `fmt`, `test`, `doc`, `lsp` and `fuzz` commands, plus a versioned normative spec with a conformance suite.
 
 **Shared:** static types, enums with data, generics, Python implementation, tuples, structs and exhaustive enum matching.
+
+## Roadmap implications of the niche
+
+[DECISIONS.md](DECISIONS.md) makes Vex the statically checked extension language that native programs, Mort first, embed. This
+section re-ranks the gaps above for that niche. Where the two disagree, this order wins. Gap numbers refer to the list above; `N`
+marks work the audit did not list. Hours are estimates.
+
+The audit's interop assumptions changed after a working spike. Mort needs **no shared-library output and no compiler change**, and
+`python -m ziglang cc` builds and links on this machine (gap 4's "depends on" and "no direct path" no longer apply). `extern` syntax
+in Vex is rejected, so the parser, resolver and checker items in gap 4 mostly go away.
+
+| New rank | Item | Old rank | Why here | Size |
+|---------:|------|---------:|----------|------|
+| 1 | Gap 1: `break` / `continue` corrupt the stack | 1 | Silent miscompile that can hang a host | 4-8 h |
+| 2 | Gap 3: Python exceptions and out-of-range values escape | 3 | Each one becomes a host-visible internal failure; sets the value contract the ABI relies on | 8-12 h |
+| 3 | Gap 2: lexer crashes | 2 | Script text is now input the host did not write | 3-5 h |
+| 4 | Gap 7: exponential compile time | 7 | A short script can stall its host during `load`, before any budget applies | 6-10 h |
+| 5 | Gap 4a: public per-instance Python host API (`host.*` namespace) | 4 | Foundation for everything embedded; removes the global `stdlib` mutation | 8-12 h |
+| 6 | N1: capability gating and execution budget | new | `io.write_file` worked from an embedded script; an infinite loop has no stop. Without this the niche claim is false | 8-14 h |
+| 7 | Gap 4b: `VexApi` table, `vex.mx`, `docs/ffi.md`, demo, CI (criterion e) | 4 | The exit criterion | 16-24 h |
+| 8 | Gap 5: finish the spec, adding the embedding contract (criterion a) | 5 | The new backend needs something to conform to | 12-16 h |
+| 9 | Gap 6: last example, `CONTRIBUTING.md`, release, new distribution name (criteria d, g) | 6 | Cheap exit-criteria closure; the embed demo can be the tenth example. Release after ranks 1-7 | 4-8 h |
+| 10 | Gap 13: replace the VM with a Python `ast` backend, target within 5x CPython | 13 | Answers "why not Python?"; `requires-python` rises to 3.11. Comes after the ABI, which does not depend on it | 30-50 h |
+| 11 | Gap 10: LSP and highlighting | 10 | Script authors are the second user group, and they meet the editor first | 24-46 h |
+| 12 | Gap 12: `vex test` | 12 | Hosts need to test rules without running the host; needs a fake `host.*` | 8-12 h |
+| 13 | Gap 15: lint warnings | 15 | Cheap help for the same audience | 6-10 h |
+| 14 | Gap 14, narrowed: JSON, time and data helpers only | 14 | Non-goal 4 removes process, network and directory APIs; effects come from the host | 8-12 h |
+| 15 | Gap 11: formatter | 11 | Useful, not distinctive | 20-30 h |
+| 16 | Gap 9, narrowed: namespaced imports, no package manager | 9 | Scripts are small and the host chooses what loads; needed only when scripts share libraries | 15-25 h |
+| 17 | Gap 8: traits | 8 | Largest cost and least relevant to short scripts; add when a real script needs one | 40-80 h |
+
+**Dropped:** the package manager from gap 9, the native VM and compile-to-C paths in gaps 4 and 13, and any `extern` syntax.
+
+**Mort-side work** (in the Mort repo, listed in DECISIONS.md D7): declare the FFI struct-layout and function-pointer guarantee in the
+spec, which rank 7 relies on. Fixing the `_split_type_list` bug is recommended but does not block anything.

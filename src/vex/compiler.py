@@ -9,7 +9,7 @@ from vex import syntax as ast
 from vex.diagnostics import Span
 from vex.runtime import Adt, AdtInfo, BuiltinFn, Closure
 from vex.symbols import Builtin, Env, FnSym, GlobalVar, LocalSym, VariantInfo
-from vex.vtypes import TCon, TTuple, Type, zonk
+from vex.vtypes import TCon, TNever, TTuple, Type, zonk
 
 INT_BINOPS = {"+": bc.ADD_I, "-": bc.SUB_I, "*": bc.MUL_I, "/": bc.DIV_I, "%": bc.MOD_I}
 FLOAT_BINOPS = {"+": bc.ADD_F, "-": bc.SUB_F, "*": bc.MUL_F, "/": bc.DIV_F, "%": bc.MOD_F}
@@ -25,9 +25,10 @@ def _ty_name(t: Type | None) -> str:
 
 
 class Loop:
-    def __init__(self, start: int | None, has_iter: bool) -> None:
+    def __init__(self, start: int | None, has_iter: bool, depth: int) -> None:
         self.start = start  # continue target (None until known)
         self.has_iter = has_iter
+        self.depth = depth  # operands on the stack at a jump target, the iterator included
         self.breaks: list[int] = []
         self.continues: list[int] = []
 
@@ -78,6 +79,7 @@ class FnCompiler:
         self.slots: dict[LocalSym, int] = {}
         self.nlocals = 0
         self.loops: list[Loop] = []
+        self.depth = 0  # operands held on the stack while the current expression is compiled
         self.span: Span | None = None
 
     # ------------------------------------------------------------ emit helpers
@@ -153,6 +155,22 @@ class FnCompiler:
         finally:
             self.span = saved
 
+    def cx_over(self, held: int, e: ast.Expr) -> None:
+        """Compile ``e`` while ``held`` operands sit below it; a jump out of ``e`` must discard them."""
+        self.depth += held
+        self.cx(e)
+        self.depth -= held
+
+    def cx_each(self, es: list[ast.Expr]) -> None:
+        """Compile ``es`` left to right, each value staying on the stack under the next."""
+        for held, e in enumerate(es):
+            self.cx_over(held, e)
+
+    def unwind(self, loop: Loop) -> None:
+        """Discard the operands above ``loop``'s entry depth, just before jumping to it."""
+        for _ in range(self.depth - loop.depth):
+            self.emit(bc.POP)
+
     def cstmt(self, e: ast.Expr) -> None:
         """Compile ``e`` for effect only (no value left on the stack)."""
         saved = self.span
@@ -188,26 +206,22 @@ class FnCompiler:
         elif isinstance(e, ast.UnitLit):
             self.emit(bc.CONST, None)
         elif isinstance(e, ast.Interp):
-            for p in e.parts:
+            for held, p in enumerate(e.parts):
                 if isinstance(p, str):
                     self.emit(bc.CONST, p)
                 else:
-                    self.cx(p)
+                    self.cx_over(held, p)
             self.emit(bc.BUILD_STR, len(e.parts))
         elif isinstance(e, ast.Name):
             self.cname(e)
         elif isinstance(e, ast.ListLit):
-            for i in e.items:
-                self.cx(i)
+            self.cx_each(e.items)
             self.emit(bc.MAKE_LIST, len(e.items))
         elif isinstance(e, ast.TupleLit):
-            for i in e.items:
-                self.cx(i)
+            self.cx_each(e.items)
             self.emit(bc.MAKE_TUPLE, len(e.items))
         elif isinstance(e, ast.MapLit):
-            for k, v in e.pairs:
-                self.cx(k)
-                self.cx(v)
+            self.cx_each([x for pair in e.pairs for x in pair])
             self.emit(bc.MAKE_MAP, len(e.pairs))
         elif isinstance(e, ast.Unary):
             self.cx(e.operand)
@@ -222,8 +236,7 @@ class FnCompiler:
         elif isinstance(e, ast.Field):
             self.cfield(e)
         elif isinstance(e, ast.Index):
-            self.cx(e.obj)
-            self.cx(e.index)
+            self.cx_each([e.obj, e.index])
             self.emit(bc.INDEX)
         elif isinstance(e, ast.Try):
             self.cx(e.operand)
@@ -251,16 +264,17 @@ class FnCompiler:
             self.emit(bc.RET)
         elif isinstance(e, ast.Break):
             loop = self.loops[-1]
+            self.unwind(loop)
             loop.breaks.append(self.emit(bc.JMP, None))
         elif isinstance(e, ast.Continue):
             loop = self.loops[-1]
+            self.unwind(loop)
             if loop.start is not None:
                 self.emit(bc.JMP, loop.start)
             else:
                 loop.continues.append(self.emit(bc.JMP, None))
         elif isinstance(e, ast.RangeExpr):
-            self.cx(e.lo)
-            self.cx(e.hi)
+            self.cx_each([e.lo, e.hi])
             self.emit(bc.RANGE_INCL if e.inclusive else bc.RANGE)
         elif isinstance(e, ast.StructLit):
             self.cstruct(e)
@@ -331,31 +345,24 @@ class FnCompiler:
             else:
                 self.emit(FUSED_CMP[op], (slot, e.right.value))
             return
-        self.cx(e.left)
-        self.cx(e.right)
+        self.cx_each([e.left, e.right])
         if op in CMP_OPS:
             self.emit(CMP_OPS[op])
-        elif tn == "Int":
-            self.emit(INT_BINOPS[op])
-        elif tn == "Float":
-            self.emit(FLOAT_BINOPS[op])
-        elif tn == "Str":
-            self.emit(bc.ADD_S)
         else:
-            raise AssertionError(f"binary {op} on {tn!r}")  # pragma: no cover
+            self.carith(op, e.left.ty)
 
     # ---- calls
     def ccall(self, e: ast.Call) -> None:
         target = e.target
         n = len(e.args)
+        operands = list(e.args)
         if e.is_method:
             assert isinstance(e.callee, ast.Field)
-            self.cx(e.callee.obj)
+            operands.insert(0, e.callee.obj)
             n += 1
         elif target is None:
-            self.cx(e.callee)
-        for a in e.args:
-            self.cx(a)
+            operands.insert(0, e.callee)
+        self.cx_each(operands)
         if target is None and not e.is_method:
             self.emit(bc.CALL, len(e.args))
         elif isinstance(target, FnSym):
@@ -373,8 +380,7 @@ class FnCompiler:
         assert info is not None
         order = [info.field_index(n) for n, _, _ in e.fields]
         if order == list(range(len(info.fields))):
-            for _, _, v in e.fields:
-                self.cx(v)
+            self.cx_each([v for _, _, v in e.fields])
         else:
             temps: dict[int, int] = {}
             for (_, _, v), idx in zip(e.fields, order):
@@ -410,7 +416,7 @@ class FnCompiler:
             else:
                 if compound:
                     self.cname(tgt)
-                self.cx(e.value)
+                self.cx_over(1 if compound else 0, e.value)
                 if compound:
                     self.carith(e.op[0], tgt.ty)
             if isinstance(sym, LocalSym):
@@ -422,18 +428,17 @@ class FnCompiler:
             if compound:
                 self.emit(bc.DUP)
                 self.emit(bc.GET_FIELD, tgt.index)
-            self.cx(e.value)
+            self.cx_over(2 if compound else 1, e.value)
             if compound:
                 self.carith(e.op[0], tgt.ty)
             self.emit(bc.SET_FIELD, tgt.index)
         else:
             assert isinstance(tgt, ast.Index)
-            self.cx(tgt.obj)
-            self.cx(tgt.index)
+            self.cx_each([tgt.obj, tgt.index])
             if compound:
                 self.emit(bc.DUP2)
                 self.emit(bc.INDEX)
-            self.cx(e.value)
+            self.cx_over(3 if compound else 2, e.value)
             if compound:
                 self.carith(e.op[0], tgt.ty)
             self.emit(bc.SET_INDEX)
@@ -442,14 +447,17 @@ class FnCompiler:
 
     def carith(self, op: str, ty: Type | None) -> None:
         tn = _ty_name(ty)
-        if tn == "Int":
+        if ty is not None and isinstance(zonk(ty), TNever):
+            # No value of type Never exists: evaluating the operand already left this path.
+            self.emit(bc.PANIC, "unreachable: arithmetic on a value of type Never")
+        elif tn == "Int":
             self.emit(INT_BINOPS[op])
         elif tn == "Float":
             self.emit(FLOAT_BINOPS[op])
         elif tn == "Str":
             self.emit(bc.ADD_S)
         else:
-            raise AssertionError(f"compound op on {tn!r}")  # pragma: no cover
+            raise AssertionError(f"arithmetic {op} on {tn!r}")  # pragma: no cover
 
     # ---- control flow
     def cblock(self, b: ast.Block, want: bool) -> None:
@@ -530,10 +538,10 @@ class FnCompiler:
 
     def cwhile(self, e: ast.While, want: bool) -> None:
         start = self.here()
-        loop = Loop(start, False)
-        self.loops.append(loop)
-        self.cx(e.cond)
+        loop = Loop(start, False, self.depth)
+        self.cx(e.cond)  # outside the loop's scope, as in the resolver: a jump here leaves the enclosing loop
         jf = self.emit(bc.JMP_F, None)
+        self.loops.append(loop)
         self.cblock(e.body, False)
         self.emit(bc.JMP, start)
         self.loops.pop()
@@ -546,13 +554,15 @@ class FnCompiler:
         self.cx(e.iter)
         self.emit(bc.ITER)
         start = self.here()
-        loop = Loop(start, True)
+        self.depth += 1  # the iterator stays below everything the body evaluates
+        loop = Loop(start, True, self.depth)
         self.loops.append(loop)
         fo = self.emit(bc.FOR_ITER, None)
         self.bind_irrefutable(e.pat)
         self.cblock(e.body, False)
         self.emit(bc.JMP, start)
         self.loops.pop()
+        self.depth -= 1
         if loop.breaks:
             self.patch_all(loop.breaks)
             self.emit(bc.POP)  # discard the iterator when leaving via break
