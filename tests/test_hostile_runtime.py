@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import os
 import subprocess
 import sys
 import threading
@@ -15,6 +16,7 @@ from helpers import run_body, run_source
 
 from vex import api, cli, repl, runtime, stdlib
 from vex.api import compile_text
+from vex.checker import Checker
 from vex.diagnostics import VexError, VexRuntimeError
 from vex.vm import VM
 
@@ -111,7 +113,7 @@ def test_valid_program_arguments_are_unchanged() -> None:
 
 
 def test_undecodable_environment_variable_is_a_located_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(stdlib.os, "environ", {"VEX_BAD": "\udc80", "VEX_FINE": "é"})
+    monkeypatch.setattr(os, "environ", {"VEX_BAD": "\udc80", "VEX_FINE": "é"})
     assert run_body('print(env.get("VEX_FINE"));') == 'Some("é")\n'
     assert run_body('print(env.get("VEX_MISSING"));') == "None\n"
     panics('print(env.get("VEX_BAD"));', "environment variable VEX_BAD is not valid Unicode")
@@ -506,7 +508,7 @@ def test_vm_is_reusable_after_running_out_of_memory(monkeypatch: pytest.MonkeyPa
 
 
 def test_running_out_of_memory_while_compiling_is_a_diagnostic(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(api.Checker, "check_all", out_of_memory)
+    monkeypatch.setattr(Checker, "check_all", out_of_memory)
     with pytest.raises(VexError) as info:
         compile_text("fn main() {}", "<t>")
     assert [d.code for d in info.value.diagnostics] == ["out-of-memory"]
@@ -521,7 +523,7 @@ def test_running_out_of_memory_while_compiling_in_the_repl_keeps_the_session(sta
     if stage == "parse_source":
         monkeypatch.setattr(repl, "parse_source", out_of_memory)
     else:
-        monkeypatch.setattr(repl.Checker, "check_all", out_of_memory)
+        monkeypatch.setattr(Checker, "check_all", out_of_memory)
     session.handle("keep")
     monkeypatch.undo()
     session.handle("keep + 1")
