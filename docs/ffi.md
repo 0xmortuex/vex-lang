@@ -259,7 +259,6 @@ measurements of these scripts, not an upper bound; a script of another shape can
 
 | Script | Peak | Stopped by |
 |--------|-----:|------------|
-| `fn f() -> Int { 0 }` | 27 MB | returns |
 | `fn r(n) { [0, ... 500 items, r(n + 1)][0] }` | 487 MB | stack limit (status 2) |
 | `xs.push([E.A, ... 1000 items])` in a loop | 353 MB | budget |
 | `a = Cons(i + 1, a)` in a loop | 237 MB | budget |
@@ -280,8 +279,9 @@ reached, so it needs no budget to end it. `a == a`, on the same object, is simpl
 any cycle is reached returns `false`. Two cycles of different lengths whose elements agree still terminate, with the same error. Shared
 values that are not cycles are fine; the check tracks only what is on the current path.
 
-Hashing and ordering cannot reach a cycle. A map key must be `Int`, `Str`, `Bool` or a tuple of those, and only those and lists of
-those can be ordered, so the checker rejects a struct or enum in either position.
+Hashing and ordering cannot reach a cycle. A map key must be `Int`, `Str`, `Bool`, `()`, a tuple of those, or a type parameter bounded by `Hash`. A value
+can be ordered if it is `Int`, `Float`, `Str`, `Bool`, `()`, a tuple or list of those (nested to any depth), or a type parameter bounded by
+`Ord`. The checker rejects a struct or enum in either position, and those are the only values that can contain themselves.
 
 ## Threads and re-entry
 
