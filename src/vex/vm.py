@@ -534,9 +534,11 @@ class VM:
                     else:
                         push(nxt)
                 elif op == RANGE:
+                    self.charge(arg)
                     hi = pop()
                     stack[-1] = range(stack[-1], hi)
                 elif op == RANGE_INCL:
+                    self.charge(arg)
                     hi = pop()
                     stack[-1] = range(stack[-1], hi + 1)
                 elif op == BUILD_STR:

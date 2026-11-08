@@ -47,6 +47,8 @@ CHARGED: dict[str, tuple[str, str, str, int]] = {
     "GE": ("", LARGE, "let _a = s >= t;", W),
     "INDEX": ("", KEYED, "let _a = m[k2];", W),
     "SET_INDEX": ("", KEYED, "m[k2] = 1;", W),
+    "RANGE": ("", "", "let _a = 1000..2000;", 4),  # the range object and its three integers
+    "RANGE_INCL": ("", "", "let _a = 1000..=2000;", 4),
 }
 
 CONSTANT: dict[str, str] = {
@@ -88,7 +90,6 @@ CONSTANT: dict[str, str] = {
     ),
     "RET": "O(1)",
     **dict.fromkeys(["GET_FIELD", "SET_FIELD", "GET_TUPLE", "TAG_IS", "TRY"], "O(1)"),
-    **dict.fromkeys(["RANGE", "RANGE_INCL"], "a range object is constant size"),
     **dict.fromkeys(["ITER", "FOR_ITER"], "O(1) per step, charged by the loop back-edge"),
     "PANIC": "ends the script",
     **dict.fromkeys(
@@ -126,6 +127,18 @@ def test_opcode_is_charged_for_what_it_builds(name: str) -> None:
     assert extra >= minimum, f"{name} charged {extra} units for work of {minimum}"
 
 
+def test_a_range_that_is_kept_is_charged_and_a_loop_head_is_not() -> None:
+    def used(src: str) -> int:
+        h = Host()
+        h.budget(10_000)
+        h.load("r.vx", src)
+        h.call("go", [])
+        return 10_000 - h.fuel_left()
+
+    assert used("fn go() { for _ in 0..5 { } }") == 6
+    assert used("fn go() { let r = 0..5; for _ in r { } }") == 10
+
+
 def test_a_wide_literal_in_a_loop_stops_at_the_budget() -> None:
     h = Host()
     h.budget(200_000)
@@ -156,6 +169,9 @@ RETAINING = [
     ("wide-list", "xs.push([" + ZEROS + "]);", 200),
     ("wide-tuple", "xs.push((" + ZEROS + "));", 200),
     ("empty-list", "xs.push([1]);", 3000),
+    ("range", "xs.push(i + 1000..i + 2000);", 3000),
+    ("range-inclusive", "xs.push(i + 1000..=i + 2000);", 3000),
+    ("wide-list-of-ranges", "xs.push([" + ",".join(["i + 1000..=i + 2000"] * W) + "]);", 100),
     ("pair-tuple", "xs.push((i, i));", 3000),
     ("some-int", "xs.push(Some(i));", 3000),
     ("first-of-list", "let ys = [i]; xs.push(ys.first());", 3000),
