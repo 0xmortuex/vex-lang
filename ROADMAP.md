@@ -89,6 +89,9 @@ there is no direct path in either direction; Mort could only spawn `vex` as a su
 
 ### 1. `break` / `continue` inside an expression corrupt the operand stack
 
+- **Status: fixed on branch `fix/break-continue-in-expr`.** The forms stay valid, as `docs/types.md` types them
+  `Never`: the compiler tracks held operands and emits `POP`s down to the loop's entry depth before the jump.
+  Tests: `tests/test_break_in_expr.py`. The rest of this entry records the problem as audited.
 - **Missing:** Jumps do not unwind expression temporaries. `for` keeps its iterator on the same stack.
 - **Why it matters:** A well-typed program gets the wrong behaviour with no diagnostic. This is the only silent
   miscompile found, so it comes first.

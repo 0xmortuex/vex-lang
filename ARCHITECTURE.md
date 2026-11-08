@@ -64,8 +64,8 @@ There is no optimiser pass and no on-disk bytecode format. Instruction fusion ha
   not Python recursion. Builtins that call back (`map`, `filter`, ...) re-enter `execute` through `VM.call`,
   so that path does consume Python stack.
 - **Operand stacks are per frame.** `for` keeps its iterator on the operand stack, and expression
-  temporaries live on the same stack. `break` / `continue` jump without unwinding temporaries (see
-  ROADMAP gap 1).
+  temporaries live on the same stack. The compiler tracks the operands held at each point, and
+  `break` / `continue` emit `POP`s down to the loop's entry depth before jumping.
 - **Closures.** Immutable captures are copied. A `let mut` captured by a closure lives in a `Cell` from its
   declaration (`LocalSym.boxed`).
 
