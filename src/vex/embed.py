@@ -11,9 +11,11 @@ from __future__ import annotations
 
 import ctypes
 import itertools
+import signal
 import sys
 from collections.abc import Callable
 from ctypes import CFUNCTYPE, POINTER, Structure, c_char_p, c_double, c_longlong, c_void_p, string_at
+from functools import wraps
 from typing import Any
 
 from vex.diagnostics import VexError, VexRuntimeError
@@ -94,6 +96,25 @@ class _Instance:
 _handles = itertools.count(1)
 _instances: dict[int, _Instance] = {}
 _no_instance_error = _c_string("")
+# Used when even recording an error failed. Static, so reporting cannot fail again.
+_UNREPORTABLE = ctypes.create_string_buffer(b"internal error: the failure could not be recorded")
+_UNREPORTABLE_ADDRESS = ctypes.addressof(_UNREPORTABLE)
+
+
+def _entry(default: Any) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    """Make a table entry unable to raise: the handler does no work that could fail, not even a call."""
+
+    def decorate(fn: Callable[..., Any]) -> Callable[..., Any]:
+        @wraps(fn)
+        def guarded(*args: Any) -> Any:
+            try:
+                return fn(*args)
+            except BaseException:
+                return default
+
+        return guarded
+
+    return decorate
 
 
 def _instance(vm: int | None) -> _Instance:
@@ -120,29 +141,42 @@ def _text(raw: bytes | None, what: str) -> str:
         raise VexBindingError(f"{what} is not valid UTF-8") from None
 
 
+def _status_and_text(e: BaseException, internal_status: int) -> tuple[int, str]:
+    if isinstance(e, VexError):
+        return STATUS_COMPILE, str(e)
+    if isinstance(e, VexBudgetError):
+        return STATUS_BUDGET, e.render()
+    if isinstance(e, VexRuntimeError):
+        return STATUS_RUNTIME, e.render()
+    if isinstance(e, VexBindingError):
+        return STATUS_BINDING, f"binding error: {e}"
+    return internal_status, f"internal error: {type(e).__name__}: {e}"
+
+
 def _status(vm: int | None, internal_status: int, body: Callable[[_Instance], None]) -> int:
     """Run one API call: clear the last error, then map every failure to its status code."""
     inst: _Instance | None = None
+    status = internal_status
     try:
         inst = _instance(vm)
         inst.error = _c_string("")
         body(inst)
         return STATUS_OK
-    except VexError as e:
-        _set_error(inst, str(e))
-        return STATUS_COMPILE
-    except VexBudgetError as e:
-        _set_error(inst, e.render())
-        return STATUS_BUDGET
-    except VexRuntimeError as e:
-        _set_error(inst, e.render())
-        return STATUS_RUNTIME
-    except VexBindingError as e:
-        _set_error(inst, f"binding error: {e}")
-        return STATUS_BINDING
     except BaseException as e:
-        _set_error(inst, f"internal error: {type(e).__name__}: {e}")
-        return internal_status
+        try:
+            status, text = _status_and_text(e, internal_status)
+            _set_error(inst, text)
+        except BaseException:
+            _note_unreportable(inst)
+        return status
+
+
+def _note_unreportable(inst: _Instance | None) -> None:
+    global _no_instance_error
+    if inst is None:
+        _no_instance_error = _UNREPORTABLE
+    else:
+        inst.error = _UNREPORTABLE
 
 
 def _from_wire(v: VexValue) -> Any:
@@ -193,6 +227,7 @@ def _to_wire(slot: VexValue, value: Any) -> ctypes.Array[ctypes.c_char] | None:
 
 
 # ------------------------------------------------------------------ the table's entry points
+@_entry(None)
 def _api_open(caps: int) -> int | None:
     try:
         if caps < 0 or caps > CAP_ALL:
@@ -206,6 +241,7 @@ def _api_open(caps: int) -> int | None:
         return None
 
 
+@_entry(None)
 def _api_close(vm: int | None) -> None:
     try:
         if vm is not None:
@@ -220,7 +256,10 @@ def _host_trampoline(inst: _Instance, name: str, ctx: int | None, fn: Any) -> Ca
     def go(*args: Any) -> Any:
         n = len(args)
         argv = (VexValue * max(n, 1))()
-        keep = [_to_wire(argv[i], a) for i, a in enumerate(args)]
+        try:
+            keep = [_to_wire(argv[i], a) for i, a in enumerate(args)]
+        except UnicodeEncodeError:
+            raise VexBindingError(f"host function `{name}` was passed a Str that cannot be encoded as UTF-8") from None
         ret = VexValue()
         ret_address = ctypes.addressof(ret)
         inst.host_returns[ret_address] = None
@@ -241,6 +280,7 @@ def _host_trampoline(inst: _Instance, name: str, ctx: int | None, fn: Any) -> Ca
     return go
 
 
+@_entry(STATUS_BINDING)
 def _api_bind(vm: int | None, name: bytes | None, sig: bytes | None, ctx: int | None, fn: Any) -> int:
     def body(inst: _Instance) -> None:
         text = _text(name, "the function name")
@@ -252,6 +292,7 @@ def _api_bind(vm: int | None, name: bytes | None, sig: bytes | None, ctx: int | 
     return _status(vm, STATUS_BINDING, body)
 
 
+@_entry(STATUS_COMPILE)
 def _api_load(vm: int | None, path: bytes | None, src: int | None, length: int) -> int:
     def body(inst: _Instance) -> None:
         name = _text(path, "the script path")
@@ -268,6 +309,7 @@ def _api_load(vm: int | None, path: bytes | None, src: int | None, length: int) 
     return _status(vm, STATUS_COMPILE, body)
 
 
+@_entry(STATUS_RUNTIME)
 def _api_call(vm: int | None, name: bytes | None, argv: Any, argc: int, ret: Any) -> int:
     def body(inst: _Instance) -> None:
         if not ret:
@@ -285,32 +327,30 @@ def _api_call(vm: int | None, name: bytes | None, argv: Any, argc: int, ret: Any
         finally:
             if inst.host.caps & CAP_PRINT:
                 sys.stdout.flush()
-        buffer = _to_wire(result, value)
-        inst.ret_buffer = buffer
+        inst.ret_buffer = _to_wire(result, value)
 
     return _status(vm, STATUS_RUNTIME, body)
 
 
+@_entry(STATUS_BINDING)
 def _api_budget(vm: int | None, units: int) -> int:
     return _status(vm, STATUS_BINDING, lambda inst: inst.host.budget(units))
 
 
+@_entry(_UNREPORTABLE_ADDRESS)
 def _api_error(vm: int | None) -> int:
-    try:
-        inst = _instances.get(vm) if vm is not None else None
-        return ctypes.addressof(inst.error if inst is not None else _no_instance_error)
-    except BaseException:
-        return ctypes.addressof(_no_instance_error)
+    inst = _instances.get(vm) if vm is not None else None
+    return ctypes.addressof(inst.error if inst is not None else _no_instance_error)
 
 
+@_entry(None)
 def _api_fail(vm: int | None, message: bytes | None) -> None:
-    try:
-        inst = _instance(vm)
-        inst.pending_fail = "host function failed" if message is None else message.decode("utf-8", "replace")
-    except BaseException as e:
-        _set_error(None, f"fail called with a bad instance: {type(e).__name__}: {e}")
+    # If this cannot record the message, the HostFn's non-zero return still reports a failure.
+    inst = _instance(vm)
+    inst.pending_fail = "host function failed" if message is None else message.decode("utf-8", "replace")
 
 
+@_entry(None)
 def _api_return_str(vm: int | None, ret: Any, s: int | None, length: int) -> None:
     inst: _Instance | None = None
     try:
@@ -356,6 +396,10 @@ def attach(address: int) -> None:
     if api.abi_version != ABI_VERSION:
         sys.stderr.write(f"vex.embed: host ABI version {api.abi_version} does not match {ABI_VERSION}\n")
         return
+    # Python's default handler would raise KeyboardInterrupt at any bytecode, even entering a callback from
+    # native code. A host that installed its own SIGINT handler keeps it.
+    if signal.getsignal(signal.SIGINT) is signal.default_int_handler:
+        signal.signal(signal.SIGINT, signal.SIG_DFL)
     for field, pointer in _TABLE:
         setattr(api, field, pointer)
     api.ready = 1

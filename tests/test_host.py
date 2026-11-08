@@ -360,7 +360,9 @@ def test_out_of_range_int_result_is_an_error() -> None:
         h.call("go", [])
 
 
-def test_lone_surrogate_result_is_an_error() -> None:
+def test_lone_surrogate_result_is_an_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    # to_char now refuses surrogates, so force one through to exercise the result check itself.
+    monkeypatch.setattr(stdlib.METHODS["Int"]["to_char"], "impl", chr)
     h = Host()
     h.load("r.vx", "fn go() { 55296.to_char() }")
     with pytest.raises(VexRuntimeError, match="UTF-8"):

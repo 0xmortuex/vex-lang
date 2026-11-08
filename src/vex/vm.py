@@ -86,16 +86,26 @@ from vex.runtime import (
     Cell,
     Closure,
     VexBudgetExceeded,
+    VexExit,
     VexPanic,
+    charge_size,
     display,
+    values_equal,
 )
 
 MAX_DEPTH = 100_000
 BUDGET_MESSAGE = "execution budget exhausted"
+
+# Each level of a builtin calling back into Vex costs at most about 5 Python frames. In an embedding this cap,
+# with the host re-entry cap, keeps every callback from native code well inside Python's recursion limit.
+MAX_CALLBACK_DEPTH = 100
+_FLAT = frozenset({int, float, bool, type(None)})
 _DONE = object()
 
 
 class VM:
+    callback_depth = 0  # process-wide: nesting crosses instances when hosts re-enter each other
+
     def __init__(self, out: TextIO | None = None, args: list[str] | None = None) -> None:
         self.out: Any = out if out is not None else sys.stdout
         self.args = args or []
@@ -103,6 +113,7 @@ class VM:
         self.globals: dict[str, Any] = {}
         # Units left in the current embedded call. Infinite for programs outside an embedding.
         self.fuel: float = math.inf
+        self.embedded = False  # an embedded VM caps callback nesting and locates internal failures
 
     # ------------------------------------------------------------ public API
     def charge(self, units: int) -> None:
@@ -111,19 +122,43 @@ class VM:
         if self.fuel < 0:
             raise VexBudgetExceeded(BUDGET_MESSAGE)
 
+    def equal(self, a: Any, b: Any) -> bool:
+        """Vex ``==``, charged to the budget while it compares."""
+        return values_equal(a, b, self.charge)
+
+    def _order(self, op: int, a: Any, b: Any) -> bool:
+        """``<`` and friends on strings and sequences: charge for the data, then compare."""
+        if type(a) is str:
+            self.charge(min(len(a), len(b)))
+        else:
+            charge_size(a, self.charge)
+        if op == LT:
+            return bool(a < b)
+        if op == LE:
+            return bool(a <= b)
+        if op == GT:
+            return bool(a > b)
+        return bool(a >= b)
+
     def call(self, f: Any, args: list[Any]) -> Any:
         """Call a Vex function value from Python (used by higher-order builtins)."""
         self.charge(1)
-        if type(f) is Closure:
-            code = f.code
-            locals_ = f.captured + args
-            pad = code.nlocals - len(locals_)
-            if pad > 0:
-                locals_ = locals_ + [None] * pad
-            return self.execute(code, locals_)
-        if type(f) is BuiltinFn:
-            return f.fn(self, *args) if f.needs_vm else f.fn(*args)
-        raise VexPanic(f"value of type {type(f).__name__} is not callable")  # pragma: no cover
+        if self.embedded and VM.callback_depth >= MAX_CALLBACK_DEPTH:
+            raise VexPanic(f"recursion through builtins is too deep (more than {MAX_CALLBACK_DEPTH} levels)")
+        VM.callback_depth += 1
+        try:
+            if type(f) is Closure:
+                code = f.code
+                locals_ = f.captured + args
+                pad = code.nlocals - len(locals_)
+                if pad > 0:
+                    locals_ = locals_ + [None] * pad
+                return self.execute(code, locals_)
+            if type(f) is BuiltinFn:
+                return f.fn(self, *args) if f.needs_vm else f.fn(*args)
+            raise VexPanic(f"value of type {type(f).__name__} is not callable")  # pragma: no cover
+        finally:
+            VM.callback_depth -= 1
 
     def run_function(self, code: Code, args: list[Any] | None = None) -> Any:
         """Run a top-level function to completion, converting failures to VexRuntimeError."""
@@ -229,7 +264,10 @@ class VM:
                     pc = arg
                 elif op == LT:
                     b = pop()
-                    stack[-1] = stack[-1] < b
+                    if type(b) in _FLAT:
+                        stack[-1] = stack[-1] < b
+                    else:
+                        stack[-1] = self._order(LT, stack[-1], b)
                 elif op == MUL_I:
                     b = pop()
                     r = stack[-1] * b
@@ -262,23 +300,38 @@ class VM:
                         stack[-1] = q
                 elif op == EQ:
                     b = pop()
-                    stack[-1] = stack[-1] == b
+                    if type(b) in _FLAT:
+                        stack[-1] = stack[-1] == b
+                    else:
+                        stack[-1] = values_equal(stack[-1], b, self.charge)
                 elif op == LOAD_CELL:
                     push(locals_[arg].v)
                 elif op == POP:
                     pop()
                 elif op == LE:
                     b = pop()
-                    stack[-1] = stack[-1] <= b
+                    if type(b) in _FLAT:
+                        stack[-1] = stack[-1] <= b
+                    else:
+                        stack[-1] = self._order(LE, stack[-1], b)
                 elif op == GT:
                     b = pop()
-                    stack[-1] = stack[-1] > b
+                    if type(b) in _FLAT:
+                        stack[-1] = stack[-1] > b
+                    else:
+                        stack[-1] = self._order(GT, stack[-1], b)
                 elif op == GE:
                     b = pop()
-                    stack[-1] = stack[-1] >= b
+                    if type(b) in _FLAT:
+                        stack[-1] = stack[-1] >= b
+                    else:
+                        stack[-1] = self._order(GE, stack[-1], b)
                 elif op == NE:
                     b = pop()
-                    stack[-1] = stack[-1] != b
+                    if type(b) in _FLAT:
+                        stack[-1] = stack[-1] != b
+                    else:
+                        stack[-1] = not values_equal(stack[-1], b, self.charge)
                 elif op == LE_LK:
                     push(locals_[arg[0]] <= arg[1])
                 elif op == GT_LK:
@@ -431,7 +484,7 @@ class VM:
                         stack[-1] = obj[i]
                     else:
                         if i not in obj:
-                            raise VexPanic(f"key {display(i, False)} not found in map")
+                            raise VexPanic(f"key {display(i, False, self.charge)} not found in map")
                         stack[-1] = obj[i]
                 elif op == SET_INDEX:
                     v = pop()
@@ -466,7 +519,7 @@ class VM:
                 elif op == BUILD_STR:
                     parts = stack[-arg:]
                     del stack[-arg:]
-                    built = "".join([p if type(p) is str else display(p) for p in parts])
+                    built = "".join([p if type(p) is str else display(p, charge=self.charge) for p in parts])
                     self.charge(len(built))
                     push(built)
                 elif op == TRY:
@@ -499,10 +552,22 @@ class VM:
                     raise AssertionError(f"unknown opcode {op}")
         except VexPanic as e:
             if e.trace is None:
-                # A builtin that takes the VM runs with the calling frame pushed; do not report it twice.
-                outer = frames[:-1] if frames and frames[-1][2] is locals_ else frames
-                e.trace = self.make_trace(code, pc - 1, outer)
+                e.trace = self._located_trace(code, pc, locals_, frames)
             raise
+        except VexExit:
+            raise
+        except Exception as e:
+            if not self.embedded:
+                raise
+            what = "recursion too deep" if isinstance(e, RecursionError) else f"internal error: {type(e).__name__}: {e}"
+            panic = VexPanic(what)
+            panic.trace = self._located_trace(code, pc, locals_, frames)
+            raise panic from None
+
+    def _located_trace(self, code: Code, pc: int, locals_: list[Any], frames: list[Any]) -> list[tuple[str, Span | None]]:
+        # A builtin that takes the VM runs with the calling frame pushed; do not report it twice.
+        outer = frames[:-1] if frames and frames[-1][2] is locals_ else frames
+        return self.make_trace(code, pc - 1, outer)
 
 
 def _span_at(code: Code, pc: int) -> Span | None:

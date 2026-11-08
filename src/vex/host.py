@@ -33,7 +33,8 @@ CAP_ALL = CAP_PRINT | CAP_READ | CAP_WRITE | CAP_ENV
 DEFAULT_BUDGET = 10_000_000
 
 # Each host re-entry (script to host to script) nests native and interpreter frames on one OS thread.
-# The limit keeps that well inside the 1 MiB default stack of a Windows main thread.
+# The limit is process-wide, so chains across instances count too, and keeps that well inside the 1 MiB
+# default stack of a Windows main thread.
 MAX_HOST_DEPTH = 32
 
 _CAPABILITY_OF: dict[str, tuple[int, str]] = {
@@ -120,11 +121,14 @@ def _value_problem(t: Type, v: Any) -> str | None:
 class Host:
     """One embedded Vex instance."""
 
+    _active_calls = 0  # process-wide: chains across instances share the native stack
+
     def __init__(self, caps: int = 0, out: TextIO | None = None) -> None:
         if type(caps) is not int or caps < 0 or caps > CAP_ALL:
             raise VexBindingError(f"unknown capability bits in {caps!r}")
         self.caps = caps
         self._vm = VM(out)
+        self._vm.embedded = True
         self._bindings: dict[str, Builtin] = {}
         self._program: Program | None = None
         self._budget = DEFAULT_BUDGET
@@ -167,8 +171,8 @@ class Host:
     # ------------------------------------------------------------ running scripts
     def call(self, name: str, args: list[Any]) -> Any:
         """Call a script function. Raises VexRuntimeError, VexBudgetError or VexBindingError."""
-        code, ret = self._lookup(name, args)
-        if self._depth >= MAX_HOST_DEPTH:
+        sym, code, ret = self._lookup(name, args)
+        if Host._active_calls >= MAX_HOST_DEPTH:
             raise VexRuntimeError(f"host re-entry is nested too deeply (more than {MAX_HOST_DEPTH} levels)")
         vm = self._vm
         if self._depth == 0:
@@ -176,6 +180,7 @@ class Host:
         saved_frames = vm.frames
         vm.frames = []
         self._depth += 1
+        Host._active_calls += 1
         try:
             vm.charge(1)
             result = vm.execute(code, list(args) + [None] * (code.nlocals - len(args)))
@@ -192,14 +197,16 @@ class Host:
             raise VexRuntimeError(f"internal error: {type(e).__name__}: {e}") from None
         finally:
             self._depth -= 1
+            Host._active_calls -= 1
             vm.frames = saved_frames
         if not isinstance(ret, (TNever, TVar)):  # a body that only panics never produces a value
             problem = _value_problem(ret, result)
             if problem is not None:
-                raise VexRuntimeError(f"`{name}` returned an invalid value: {problem}")
+                span = sym.decl.name_span or sym.decl.span
+                raise VexRuntimeError(f"`{name}` returned an invalid value: {problem}", [(sym.name, span)])
         return result
 
-    def _lookup(self, name: str, args: list[Any]) -> tuple[Any, Type]:
+    def _lookup(self, name: str, args: list[Any]) -> tuple[Any, Any, Type]:
         if self._program is None:
             raise VexBindingError("no script is loaded")
         fns = self._program.env.fns
@@ -221,7 +228,7 @@ class Host:
             problem = _value_problem(t, v)
             if problem is not None:
                 raise VexBindingError(f"argument {i + 1} of `{name}`: {problem}")
-        return sym.code, ret
+        return sym, sym.code, ret
 
     def _wrap(self, name: str, ty: TFn, fn: Callable[..., Any]) -> Callable[..., Any]:
         """Turn a host callable into a builtin: every failure becomes a VexPanic with a script location."""
