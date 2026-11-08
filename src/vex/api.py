@@ -124,7 +124,8 @@ def compile_source(source: Source, require_main: bool = True) -> Program:
         return _compile(source, require_main)
     except RecursionError as e:
         raise too_deep_error(e, source) from None
-    except MemoryError:
+    except MemoryError as e:
+        e.__traceback__ = None  # its frames pin the tokens and syntax tree that filled the heap
         raise out_of_memory_error(source) from None
 
 

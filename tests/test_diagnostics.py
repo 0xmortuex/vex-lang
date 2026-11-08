@@ -5,7 +5,17 @@ from __future__ import annotations
 import pytest
 
 from vex.api import compile_text
-from vex.diagnostics import Diagnostic, DiagSink, Source, Span, VexError, suggest
+from vex.diagnostics import (
+    MAX_SNIPPET_WIDTH,
+    Diagnostic,
+    DiagSink,
+    Source,
+    Span,
+    VexError,
+    VexRuntimeError,
+    out_of_memory_error,
+    suggest,
+)
 from vex.vtypes import (
     BOOL,
     ERROR,
@@ -245,3 +255,60 @@ def test_show(ty: object, text: str) -> None:
 
     assert isinstance(ty, Type)
     assert show(ty) == text
+
+
+# ---------------------------------------------------------------- rendering cannot grow with the source line
+def caret_points_at(rendered: str) -> str:
+    """The source character above the first caret of a rendered snippet."""
+    lines = rendered.splitlines()
+    index = next(i for i, ln in enumerate(lines) if "^" in ln)
+    return lines[index - 1][lines[index].index("^")]
+
+
+def test_snippet_of_a_huge_line_is_bounded_and_still_points_at_the_error() -> None:
+    src = Source("<t>", "a" * 100_000 + "@" + "b" * 100_000)
+    rendered = Diagnostic("c", "m", Span(src, 100_000, 100_001), "here").render()
+    assert len(rendered) < 1000
+    assert caret_points_at(rendered) == "@"
+    assert "<t>:1:100001" in rendered
+    assert "...a" in rendered and "b..." in rendered
+
+
+def test_snippet_at_the_ends_of_a_huge_line() -> None:
+    src = Source("<t>", "@" + "a" * 100_000 + "#")
+    start = Diagnostic("c", "m", Span(src, 0, 1)).render()
+    end = Diagnostic("c", "m", Span(src, 100_001, 100_002)).render()
+    assert len(start) < 1000 and caret_points_at(start) == "@" and "| ...@" not in start
+    assert len(end) < 1000 and caret_points_at(end) == "#"
+
+
+def test_caret_run_of_a_span_across_a_huge_line_is_bounded() -> None:
+    src = Source("<t>", "a" * 100_000)
+    rendered = Diagnostic("c", "m", Span(src, 10, 99_990)).render()
+    assert len(rendered) < 1000
+
+
+def test_only_the_line_with_the_error_is_read_from_a_long_file() -> None:
+    src = Source("<t>", "short\n" + "a" * 100_000 + "\nlast")
+    assert "| last" in Diagnostic("c", "m", Span(src, 100_007, 100_008)).render()
+
+
+def test_a_line_at_the_width_limit_is_shown_whole() -> None:
+    text = "a" * MAX_SNIPPET_WIDTH
+    rendered = Diagnostic("c", "m", Span(Source("<t>", text), 5, 7)).render()
+    assert f"1 | {text}\n" in rendered and "..." not in rendered
+
+
+def test_a_line_just_over_the_width_limit_is_clipped() -> None:
+    text = "a" * (MAX_SNIPPET_WIDTH + 1)
+    assert "..." in Diagnostic("c", "m", Span(Source("<t>", text), 5, 7)).render()
+
+
+def test_out_of_memory_diagnostic_of_a_one_line_file_is_small() -> None:
+    error = out_of_memory_error(Source("<t>", "1," * 2_500_000))
+    assert len(str(error)) < 1000
+
+
+def test_runtime_error_on_a_huge_line_is_small() -> None:
+    src = Source("<t>", "a" * 100_000)
+    assert len(VexRuntimeError("boom", [("main", Span(src, 50_000, 50_001))]).render()) < 1000

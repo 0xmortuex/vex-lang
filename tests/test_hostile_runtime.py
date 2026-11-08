@@ -19,7 +19,7 @@ from vex import api, cli, repl, runtime, stdlib
 from vex import vm as vm_module
 from vex.api import compile_text
 from vex.checker import Checker
-from vex.diagnostics import VexError, VexRuntimeError
+from vex.diagnostics import Source, VexError, VexRuntimeError, out_of_memory_error
 from vex.vm import VM
 
 MIN = "(0 - 9223372036854775807 - 1)"
@@ -710,3 +710,33 @@ def test_out_of_memory_position_does_not_leak_into_the_next_failure(monkeypatch:
         session.eval('\n"b".upper()')
     assert first.value.trace[0][1] is not None and first.value.trace[0][1].line == 1
     assert second.value.trace[0][1] is not None and second.value.trace[0][1].line == 2
+
+
+def spy_on_compile_report(monkeypatch: pytest.MonkeyPatch, target: str) -> list[bool]:
+    released: list[bool] = []
+    real = out_of_memory_error
+
+    def spy(source: Source) -> VexError:
+        current = sys.exc_info()[1]
+        assert current is not None
+        released.append(current.__traceback__ is None)
+        return real(source)
+
+    monkeypatch.setattr(target, spy)
+    return released
+
+
+def test_compile_releases_its_stack_before_reporting_out_of_memory(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(Checker, "check_all", out_of_memory)
+    released = spy_on_compile_report(monkeypatch, "vex.api.out_of_memory_error")
+    with pytest.raises(VexError):
+        compile_text("fn main() {}", "<t>")
+    assert released == [True]
+
+
+def test_repl_releases_its_stack_before_reporting_out_of_memory(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(Checker, "check_all", out_of_memory)
+    released = spy_on_compile_report(monkeypatch, "vex.repl.out_of_memory_error")
+    with pytest.raises(VexError):
+        repl.Session(io.StringIO()).eval("1")
+    assert released == [True]

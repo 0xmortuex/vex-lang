@@ -7,6 +7,8 @@ import difflib
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 
+MAX_SNIPPET_WIDTH = 200  # a longer source line is shown as a window around the error
+
 
 class Source:
     """A source file: path, text and a line-start table for offset -> line:col."""
@@ -31,6 +33,20 @@ class Source:
         start = self._starts[line - 1]
         end = self._starts[line] - 1 if line < len(self._starts) else len(self.text)
         return self.text[start:end].rstrip("\r")
+
+    def line_excerpt(self, line: int, col: int) -> tuple[str, int, bool]:
+        """Up to MAX_SNIPPET_WIDTH characters of a line around ``col``: (text, col within it, was it clipped)."""
+        if line < 1 or line > len(self._starts):
+            return "", col, False
+        start = self._starts[line - 1]
+        end = self._starts[line] - 1 if line < len(self._starts) else len(self.text)
+        if end - start <= MAX_SNIPPET_WIDTH:
+            return self.line_text(line), col, False
+        first = max(start, min(start + col - 1 - MAX_SNIPPET_WIDTH // 2, end - MAX_SNIPPET_WIDTH))
+        last = min(end, first + MAX_SNIPPET_WIDTH)
+        prefix = "..." if first > start else ""
+        suffix = "..." if last < end else ""
+        return f"{prefix}{self.text[first:last]}{suffix}", start + col - first + len(prefix), True
 
 
 def first_undecodable(text: str) -> int | None:
@@ -90,14 +106,14 @@ class Diagnostic:
 
 def _snippet(span: Span, label: str, primary: bool) -> str:
     line, col = span.source.line_col(span.start)
-    text = span.source.line_text(line)
+    text, shown_col, clipped = span.source.line_excerpt(line, col)
     end_line, end_col = span.source.line_col(max(span.start, span.end - 1))
-    width = (end_col - col + 1) if end_line == line else max(1, len(text) - col + 1)
-    width = max(1, width)
+    width = (end_col - col + 1) if end_line == line else max(1, len(text) - shown_col + 1)
+    width = max(1, min(width, len(text) - shown_col + 1) if clipped else width)
     num = str(line)
     pad = " " * len(num)
     # Keep tabs so the caret lines up under the source text.
-    lead = "".join("\t" if c == "\t" else " " for c in text[: col - 1])
+    lead = "".join("\t" if c == "\t" else " " for c in text[: shown_col - 1])
     mark = ("^" if primary else "-") * width
     arrow = "-->" if primary else ":::"
     lines = [
