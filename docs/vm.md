@@ -95,11 +95,11 @@ the failing source line with a caret and "in <function> at file:line:col" for ea
 ## Allocation limits
 
 A `Str` built by one operation is limited to 50,000,000 characters and a `List` built by one operation to
-10,000,000 elements. Every builtin that returns a `Str` or a `List`, along with `+`, interpolation, `extend`
-and the text of `print` / `eprint`, stops the program with a runtime error instead of exceeding them, and
-`io.read_file` returns `Err`. A `List` or `Map` can pass the cap only by growing one `push` or `insert` at a
-time, and builtins that would build a new list from it refuse. Running out of memory while growing one is a
-runtime error like any other.
+10,000,000 elements. Every builtin that returns a `Str` or a `List`, along with `+`, interpolation, `extend`,
+list and map literals and the text of `print` / `eprint`, stops the program with a runtime error instead of
+exceeding them, and `io.read_file` returns `Err`. Within a program, a `List` or `Map` can pass the cap only by
+growing one `push` or `insert` at a time, and builtins that would build a new list from it refuse. Running out
+of memory while growing one is a runtime error like any other.
 
 ## Performance notes
 

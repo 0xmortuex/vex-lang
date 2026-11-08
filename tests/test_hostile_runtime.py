@@ -389,9 +389,9 @@ def test_a_replacement_that_multiplies_is_refused_before_allocating() -> None:
         ('let a = "aaaaaa"; print(a + a);', "string too large"),
         ('let a = "aaaaaa"; let mut b = a; b += a; print(b);', "string too large"),
         ('let a = "aaaaaa"; print("{a}{a}");', "string too large"),
-        ("print([1, 2, 3, 4, 5, 6]);", "too large to display"),
-        ('print("{[1, 2, 3, 4, 5, 6]}");', "too large to display"),
-        ("assert_eq([1, 2, 3, 4, 5, 6], [1, 2, 3, 4, 5, 7]);", "too large to display"),
+        ("print([11, 22, 33, 44, 55]);", "too large to display"),
+        ('print("{[11, 22, 33, 44, 55]}");', "too large to display"),
+        ("assert_eq([11, 22, 33, 44, 55], [11, 22, 33, 44, 56]);", "too large to display"),
     ],
 )
 def test_limits_are_enforced_at_the_operation(body: str, fragment: str) -> None:
@@ -771,7 +771,8 @@ def test_repl_releases_its_stack_before_reporting_out_of_memory(monkeypatch: pyt
 
 
 # ---------------------------------------------------------------- the caps hold for every builtin that builds a List or Str
-SIX = "[1, 2, 3, 4, 5, 6]"
+SIX = "six"
+GROWN = "let mut six = [1, 2, 3, 4, 5]; six.push(6); let mut m = #{1: 1, 2: 2, 3: 3, 4: 4, 5: 5}; m.insert(6, 6);"  # past the caps
 
 
 @pytest.mark.usefixtures("small_limits")
@@ -785,9 +786,9 @@ SIX = "[1, 2, 3, 4, 5, 6]"
         f"{SIX}.slice(0, 6)",
         f"{SIX}.enumerate()",
         f"{SIX}.zip({SIX})",
-        '#{1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6}.keys()',
-        '#{1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6}.values()',
-        '#{1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6}.entries()',
+        "m.keys()",
+        "m.values()",
+        "m.entries()",
         r'"\n\n\n\n\n\n".lines()',
         r'"a\nb\nc\nd\ne\nf".lines()',
         r'"a\r\nb\u{2028}c\u{85}d\u{C}e\u{1C}f".lines()',
@@ -796,7 +797,7 @@ SIX = "[1, 2, 3, 4, 5, 6]"
          "lines-empty", "lines-text", "lines-every-break"],
 )  # fmt: skip
 def test_every_list_builder_enforces_the_cap(call: str) -> None:
-    panics(f"let r = {call};", "list too large")
+    panics(f"{GROWN} let r = {call};", "list too large")
 
 
 @pytest.mark.usefixtures("small_limits")
@@ -804,7 +805,7 @@ def test_every_list_builder_enforces_the_cap(call: str) -> None:
     ("call", "expected"),
     [
         ("[1, 2, 3, 4, 5].copy().len()", "5"),
-        ("[1, 2, 3, 4, 5, 6].filter(|x| x > 3).len()".replace("[1, 2, 3, 4, 5, 6]", "[1, 2, 3, 4, 5]"), "2"),
+        ("[1, 2, 3, 4, 5].filter(|x| x > 3).len()", "2"),
         (f"{SIX}.slice(1, 6).len()", "5"),
         (f"{SIX}.zip([1, 2]).len()", "2"),
         (r'"\n\n\n\n\n".lines().len()', "5"),
@@ -814,7 +815,7 @@ def test_every_list_builder_enforces_the_cap(call: str) -> None:
     ],
 )
 def test_list_cap_allows_exactly_the_limit(call: str, expected: str) -> None:
-    assert run_body(f"print({call});") == expected + "\n"
+    assert run_body(f"{GROWN} print({call});") == expected + "\n"
 
 
 @pytest.mark.usefixtures("small_limits")
@@ -867,3 +868,24 @@ def test_environment_value_over_the_cap_is_a_located_error(monkeypatch: pytest.M
     monkeypatch.setattr(os, "environ", {"VEX_LONG": "x" * 11, "VEX_FITS": "x" * 10})
     panics('print(env.get("VEX_LONG").is_some());', "string too large")
     assert run_body('print(env.get("VEX_FITS").unwrap().len());') == "10\n"
+
+
+# ---------------------------------------------------------------- literals are held to the same caps
+@pytest.mark.parametrize(
+    ("literal", "fragment"),
+    [("[1, 2, 3, 4]", "list too large"), ("#{1: 1, 2: 2, 3: 3, 4: 4}", "map too large")],
+    ids=["list", "map"],
+)
+def test_a_literal_over_the_cap_is_a_located_error(literal: str, fragment: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(runtime, "MAX_LIST_LEN", 3)
+    panics(f"let r = {literal};", fragment)
+
+
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [("print([1, 2, 3].len());", "3"), ("print(#{1: 1, 2: 2, 3: 3}.len());", "3"), ("print([[1, 2, 3], [4, 5, 6]].len());", "2")],
+    ids=["list", "map", "each-literal-counts-alone"],
+)
+def test_literals_at_the_cap_are_built(body: str, expected: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(runtime, "MAX_LIST_LEN", 3)
+    assert run_body(body) == expected + "\n"

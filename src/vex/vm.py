@@ -536,6 +536,8 @@ class VM:
                     self.charge(len(a) + len(b))
                     stack[-1] = a + b
                 elif op == MAKE_LIST:
+                    if arg > runtime.MAX_LIST_LEN:
+                        raise VexPanic(f"list too large ({arg} elements, the limit is {runtime.MAX_LIST_LEN})")
                     self.charge(1 + arg)
                     if arg:
                         items = stack[-arg:]
@@ -549,6 +551,8 @@ class VM:
                     del stack[-arg:]
                     push(tuple(items))
                 elif op == MAKE_MAP:
+                    if arg > runtime.MAX_LIST_LEN:
+                        raise VexPanic(f"map too large ({arg} entries, the limit is {runtime.MAX_LIST_LEN})")
                     self.charge(MAP_BASE_COST + 2 * arg)
                     n2 = arg * 2
                     flat = stack[-n2:] if n2 else []
