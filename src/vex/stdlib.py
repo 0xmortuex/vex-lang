@@ -163,7 +163,7 @@ def _to_int(f: float) -> int:
 
 
 def _to_char(n: int) -> str:
-    if n < 0 or n > 0x10FFFF:
+    if n < 0 or n > 0x10FFFF or 0xD800 <= n <= 0xDFFF:
         raise VexPanic(f"{n} is not a valid code point")
     return chr(n)
 
@@ -532,9 +532,22 @@ def _read_line() -> Any:
     return NONE if line == "" else some(line.rstrip("\r\n"))
 
 
+def _require_unicode(text: str, what: str) -> str:
+    """A Vex string holds Unicode scalar values; the OS hands over undecodable bytes as lone surrogates."""
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        raise VexPanic(f"{what} is not valid Unicode") from None
+    return text
+
+
 def _env_get(name: str) -> Any:
     v = os.environ.get(name)
-    return NONE if v is None else some(v)
+    return NONE if v is None else some(_require_unicode(v, f"environment variable {name}"))
+
+
+def _env_args(vm: Any) -> list[str]:
+    return [_require_unicode(a, f"program argument {i}") for i, a in enumerate(vm.args)]
 
 
 ns("io", "read_file", "(Str) -> Result[Str, Str]", _read_file)
@@ -542,7 +555,7 @@ ns("io", "write_file", "(Str, Str) -> Result[Unit, Str]", _write_file)
 ns("io", "read_line", "() -> Option[Str]", _read_line)
 ns("env", "get", "(Str) -> Option[Str]", _env_get)
 # env.args needs the VM (program arguments), registered with needs_vm below.
-_reg(NAMESPACES["env"], "env.args", "args", "() -> List[Str]", lambda vm: list(vm.args), needs_vm=True)
+_reg(NAMESPACES["env"], "env.args", "args", "() -> List[Str]", _env_args, needs_vm=True)
 
 # Which Vex type constructor names own which method tables.
 METHOD_HEADS = {"Int", "Float", "Bool", "Str", "List", "Map", "Option", "Result", "Range"}

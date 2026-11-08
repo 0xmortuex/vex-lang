@@ -20,10 +20,10 @@ EXIT_INTERNAL = 70
 
 
 def _configure_streams() -> None:
-    for stream in (sys.stdout, sys.stderr):
+    for stream, errors in ((sys.stdout, "strict"), (sys.stderr, "backslashreplace")):
         reconf = getattr(stream, "reconfigure", None)
         if reconf is not None:
-            reconf(encoding="utf-8", newline="\n")
+            reconf(encoding="utf-8", errors=errors, newline="\n")
     reconf_in = getattr(sys.stdin, "reconfigure", None)
     if reconf_in is not None:
         reconf_in(encoding="utf-8", errors="surrogateescape")  # readers report invalid UTF-8 themselves
