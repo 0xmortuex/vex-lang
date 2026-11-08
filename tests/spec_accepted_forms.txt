@@ -1,0 +1,2 @@
+// Sources the parser accepts, written independently of docs/spec.md. One per line; `repl: ` marks REPL input.
+fn m() {}

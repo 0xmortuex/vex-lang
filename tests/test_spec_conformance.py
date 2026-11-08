@@ -330,8 +330,10 @@ TOKEN_SUBCLASSES = ("UPPER_IDENT", "SELF", "WILD", "PLAIN_STRING")
 
 
 class TokenMatcher(Matcher):
-    def __init__(self, tokens: list[Token], source: Source, disabled: Event | None = None) -> None:
-        super().__init__(syntax_rules(), disabled)
+    def __init__(
+        self, tokens: list[Token], source: Source, disabled: Event | None = None, rules: Rules | None = None
+    ) -> None:
+        super().__init__(syntax_rules() if rules is None else rules, disabled)
         self.tokens = tokens
         self.source = source
 
@@ -369,7 +371,7 @@ class TokenMatcher(Matcher):
             toks = Lexer(self.source, sink, part[0], part[1]).lex()
             if sink.has_errors:
                 return False
-            sub = TokenMatcher(toks, self.source, self.disabled)
+            sub = TokenMatcher(toks, self.source, self.disabled, self.rules)
             if sub.match_ref("interp", 0) != len(toks):
                 return False
             self.events.extend(sub.events)
@@ -389,8 +391,8 @@ class CharMatcher(Matcher):
         "surrogate": lambda ch: "\ud800" <= ch <= "\udfff",
     }
 
-    def __init__(self, text: str, disabled: Event | None = None) -> None:
-        super().__init__(lexical_rules(), disabled)
+    def __init__(self, text: str, disabled: Event | None = None, rules: Rules | None = None) -> None:
+        super().__init__(lexical_rules() if rules is None else rules, disabled)
         self.text = text
 
     def lit(self, text: str, pos: int) -> int:
@@ -446,14 +448,14 @@ def parser_accepts(text: str, repl: bool = False) -> bool:
 
 
 def grammar_events(
-    text: str, start: str = "module", disabled: Event | None = None
+    text: str, start: str = "module", disabled: Event | None = None, rules: Rules | None = None
 ) -> list[Event] | None:
     """The derivation of ``text`` from ``start`` as a list of choices, or None if the grammar rejects it."""
     source = Source("t.vx", text)
     toks, clean = lex_clean(text)
     if not clean:
         return None
-    m = TokenMatcher(toks, source, disabled)
+    m = TokenMatcher(toks, source, disabled, rules)
     if m.match_ref(start, 0) != len(toks):
         return None
     return m.events
@@ -971,6 +973,9 @@ def test_repository_programs_get_the_same_verdict() -> None:
     assert not wrong, wrong[:5]
 
 
+REPL_MARK = "\x00repl:"
+
+
 def all_negative_texts() -> list[str]:
     return [sample for _, sample in negatives()]
 
@@ -1091,8 +1096,8 @@ def hash_rule(rule: str) -> int:
     return sum(ord(c) for c in rule)
 
 
-def char_full_match(rule: str, text: str, disabled: Event | None = None) -> bool:
-    m = CharMatcher(text, disabled)
+def char_full_match(rule: str, text: str, disabled: Event | None = None, rules: Rules | None = None) -> bool:
+    m = CharMatcher(text, disabled, rules)
     return m.match_ref(rule, 0) == len(text)
 
 
@@ -1158,6 +1163,155 @@ def test_every_lexical_alternative_is_exercised() -> None:
             if (node.uid, b) not in taken:
                 missing.append(f"{name}: branch {b} of {type(node).__name__}")
     assert not missing, missing
+
+
+# ------------------------------------------------------------------ the spec must not be narrower than the parser
+# Everything generated above comes from the spec, so a spec that loses a form simply generates fewer sentences. The
+# forms below are written independently of the spec: each is accepted by the parser, and the grammar must accept it.
+FORMS_FILE = ROOT / "tests" / "spec_accepted_forms.txt"
+REPL_PREFIX = "repl: "
+
+
+def accepted_forms() -> list[tuple[str, str]]:
+    """(start symbol, source) for each line of the corpus; blank lines and ``//`` lines are skipped."""
+    out: list[tuple[str, str]] = []
+    for line in FORMS_FILE.read_text(encoding="utf-8").splitlines():
+        if not line.strip() or line.startswith("//"):
+            continue
+        out.append(("repl_input", line[len(REPL_PREFIX) :]) if line.startswith(REPL_PREFIX) else ("module", line))
+    return out
+
+
+@pytest.mark.parametrize(("start", "form"), accepted_forms())
+def test_accepted_form_is_accepted_by_parser_and_grammar(start: str, form: str) -> None:
+    assert parser_accepts(form, repl=start == "repl_input"), f"the parser rejects {form!r}: {diagnostics_of(form)}"
+    assert grammar_accepts(form, start), f"the spec's grammar rejects {form!r}, which the parser accepts"
+
+
+def spec_code_blocks() -> list[str]:
+    """Every ```vex block and spec example in the documents, as complete programs."""
+    out: list[str] = []
+    for path in [*sorted((ROOT / "docs").glob("*.md")), ROOT / "README.md"]:
+        out.extend(re.findall(r"```vex(?: example [\w-]+)?\n(.*?)```", path.read_text(encoding="utf-8"), re.S))
+    return out
+
+
+def test_every_parser_accepted_program_is_in_the_grammar() -> None:
+    programs = [t for _, t in repository_programs()] + spec_code_blocks()
+    limit = sys.getrecursionlimit()
+    sys.setrecursionlimit(max(limit, 6000))
+    try:
+        missing = [t for t in programs if parser_accepts(t) and not grammar_accepts(t)]
+    finally:
+        sys.setrecursionlimit(limit)
+    assert not missing, missing[:3]
+
+
+def narrowings(node: Node) -> Iterator[tuple[str, Node]]:
+    """Every way of changing ``node`` in one place that makes it match less, or drops a required part."""
+    nothing = Seq(())
+    if isinstance(node, Ref):
+        if node.name == "IDENT":
+            yield "IDENT becomes UPPER_IDENT", Ref("UPPER_IDENT")
+        elif node.name == "STRING":
+            yield "STRING becomes PLAIN_STRING", Ref("PLAIN_STRING")
+    elif isinstance(node, Seq):
+        for i, item in enumerate(node.items):
+            yield f"drop item {i}", Seq(node.items[:i] + node.items[i + 1 :])
+            for what, changed in narrowings(item):
+                yield f"item {i}: {what}", Seq(node.items[:i] + (changed,) + node.items[i + 1 :])
+    elif isinstance(node, Alt):
+        for i, item in enumerate(node.items):
+            yield f"drop branch {i}", Alt(node.uid, node.items[:i] + node.items[i + 1 :])
+            for what, changed in narrowings(item):
+                yield f"branch {i}: {what}", Alt(node.uid, node.items[:i] + (changed,) + node.items[i + 1 :])
+    elif isinstance(node, Opt):
+        yield "optional part removed", nothing
+        yield "optional part required", node.item
+        for what, changed in narrowings(node.item):
+            yield f"inside optional: {what}", Opt(node.uid, changed)
+    elif isinstance(node, Rep):
+        yield "repetition removed", nothing
+        yield "repetition at most once", Opt(node.uid, node.item)
+        yield "repetition at least once", Seq((node.item, node))
+        for what, changed in narrowings(node.item):
+            yield f"inside repetition: {what}", Rep(node.uid, changed)
+    elif isinstance(node, Peek):
+        for what, changed in narrowings(node.item):
+            yield f"inside lookahead: {what}", Peek(changed, node.want)
+
+
+def narrowed_grammars(rules: Rules) -> Iterator[tuple[str, Rules]]:
+    for name, rule in rules.items():
+        for what, changed in narrowings(rule):
+            yield f"{name}: {what}", {**rules, name: changed}
+
+
+def undetected_narrowings() -> list[str]:
+    forms = accepted_forms()
+    negative = [
+        ("repl_input", s.removeprefix(REPL_MARK)) if s.startswith(REPL_MARK) else ("module", s)
+        for s in all_negative_texts()
+    ]
+    programs = [t for _, t in repository_programs() if parser_accepts(t)] + spec_code_blocks()
+    missed: list[str] = []
+    for what, rules in narrowed_grammars(syntax_rules()):
+        if any(grammar_events(text, start, rules=rules) is None for start, text in forms):
+            continue
+        if any(grammar_events(text, start, rules=rules) is not None for start, text in negative):
+            continue
+        if any(grammar_events(text, "module", rules=rules) is None for text in programs if parser_accepts(text)):
+            continue
+        missed.append(what)
+    return missed
+
+
+def test_every_narrowing_of_the_syntax_is_detected() -> None:
+    limit = sys.getrecursionlimit()
+    sys.setrecursionlimit(max(limit, 6000))
+    try:
+        missed = undetected_narrowings()
+    finally:
+        sys.setrecursionlimit(limit)
+    assert not missed, f"{len(missed)} changes to the grammar go unnoticed: {missed}"
+
+
+LEXICAL_FORMS: dict[str, list[str]] = {
+    "trivia": ["", " \t\r\n", "// c", "// c\n", "/* c */", "/* /* n */ */", "\ufeff", "/* * / */", " /**/ // x\n"],
+    "IDENT": ["a", "_", "a1", "é", "letx", "_1", "a_b", "日本"],
+    "keyword": sorted(KEYWORDS),
+    "PUNCT": list(PUNCT),
+    "INT": [
+        "0", "7", "1_000", "1_", "0x1F", "0XaF", "0x_1", "0x1_F", "0o7", "0O7", "0o_7", "0o1_7", "0b1", "0B0", "0b_1", "0b1_0",
+        "0123456789", "0x0123456789abcdefABCDEF"[:18], "0o01234567", "0xabcdef", "0xABCDEF",
+    ],
+    "FLOAT": ["1.5", "1.5e3", "1e3", "1E3", "1e+3", "1e-3", "1_0.5_0", "1_0e3", "1.5E-2", "0.0123456789"],
+    "STRING": [
+        '""', '"a"', '"a\nb"', '"}"', '"é"', '"\\n"', '"\\t"', '"\\r"', '"\\0"', '"\\\\"', '"\\""', '"\\{"', '"\\}"', '"\\u{41}"',
+        '"\\u{10FFFF}"', '"{a}"', '"{ {} }"', '"{"s"}"', '"{"\\""}"', '"a{b}c{d}"',
+    ],
+}
+
+
+def undetected_lexical_narrowings() -> list[str]:
+    forms = [(rule, text) for rule, texts in LEXICAL_FORMS.items() for text in texts]
+    for rule, text in forms:
+        assert LEXER_ORACLES[rule](text), f"the lexer rejects {text!r} as {rule}"
+        assert char_full_match(rule, text), f"the spec's lexical grammar rejects {text!r} as {rule}"
+    negative = [(r, s) for r, s in lexical_negatives() if r in LEXER_ORACLES]
+    missed: list[str] = []
+    for what, rules in narrowed_grammars(lexical_rules()):
+        if any(not char_full_match(r, s, rules=rules) for r, s in forms):
+            continue
+        if any(char_full_match(r, s, rules=rules) for r, s in negative):
+            continue
+        missed.append(what)
+    return missed
+
+
+def test_every_narrowing_of_the_lexical_grammar_is_detected() -> None:
+    missed = undetected_lexical_narrowings()
+    assert not missed, f"{len(missed)} changes to the lexical grammar go unnoticed: {missed}"
 
 
 # ------------------------------------------------------------------ rules that depend on token values or context
@@ -1272,6 +1426,27 @@ def examples() -> list[Example]:
             kind, want = "exit", f"{m.group('code')}\n{want}"
         out.append(Example(m.group("name"), m.group("src"), kind, want))
     return out
+
+
+def flat_spec() -> str:
+    return " ".join(spec_text().split())
+
+
+def test_display_cap_is_documented_in_errors_and_limits() -> None:
+    message = "value is too large to display"
+    assert message in _section("9. Errors"), "missing from the panic table"
+    assert message in _section("10. Limits"), "missing from the limits"
+
+
+@pytest.mark.parametrize(
+    "claim",
+    [
+        "that makes `a == a` true on any value",  # a scalar NaN is not equal to itself
+        "scalar values and is indexed by them",  # indexing a Str is `not-indexable`
+    ],
+)
+def test_retracted_claims_stay_out_of_the_spec(claim: str) -> None:
+    assert claim not in flat_spec()
 
 
 def test_examples_exist_and_are_uniquely_named() -> None:
