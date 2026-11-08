@@ -199,8 +199,7 @@ Python's stdout is flushed after each `call` on an instance with bit 1. The host
 
 A call may spend a fixed number of units; the default is 10,000,000. One unit is charged per function entry and loop back-edge.
 
-Work whose cost scales with data is charged while it happens, one unit per character or element touched, so a script cannot spend
-time or memory ahead of its budget:
+Work whose cost scales with data is charged one unit per character or element touched, before the work it pays for, in these places:
 
 - `==` and `!=` on strings, lists, tuples, maps and enums; `<`, `<=`, `>`, `>=` on strings and sequences. `==` walks values
   without recursion, so depth is limited only by the budget.
@@ -218,7 +217,19 @@ time or memory ahead of its budget:
 
 The budget resets at each outermost `call`. When it runs out, the script stops with status 4 at its current location.
 
-The budget has no hard memory cap in version 1.
+The exact memory guarantee is this. The budget is a work limit, not a memory cap, and it has no hard memory cap in version 1.
+
+- A result whose size is known is paid for before it is allocated: `repeat`, `join`, `+`, `to_list`, `concat` and the like. A
+  budget stop leaves nothing allocated for that result.
+- Interpolation charges each part before the join copies anything, so `"{s}{s}..."` stops at the first part the budget cannot pay
+  for, without allocating the result. Measured: 300 parts of a 1 MB string with a budget of 1.1 million stop with status 4 at a
+  peak of 1 MB of traced Python allocations, which is the script's own `s`.
+- Formatting a value (`display`) spends budget for each piece of text before it appends it. `io.read_file` and `io.read_line` read
+  and charge in pieces of at most 64 KiB, so they can be at most one piece ahead of the budget.
+- Memory still grows with the units a script spends, at a rate fixed by CPython's object sizes, because one unit buys one
+  element or character. Measured peak traced allocations, per unit spent: 40 bytes for `(0..n).to_list()`, 66 for `.enumerate()`,
+  35 for `.chars()`, 24 for formatting a list, 2.5 for `.split`. Choose a budget with this in mind: the default of 10,000,000
+  units can reach roughly 700 MB at the worst rate above.
 
 ## Threads and re-entry
 

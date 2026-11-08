@@ -11,6 +11,7 @@ import io
 import os
 import sys
 import time
+import tracemalloc
 from pathlib import Path
 from typing import Any
 
@@ -253,6 +254,28 @@ def test_short_circuit_setup_is_stopped_at_the_budget(op: str) -> None:
     with pytest.raises(VexBudgetError):
         h.call("go", [])
     assert time.monotonic() - start < 5.0
+
+
+def test_interpolation_stops_part_by_part_before_building_the_result() -> None:
+    parts = "{s}" * 100
+    h = Host()
+    h.budget(3_500_000)  # the repeat costs 1M, then two parts fit and the third does not
+    h.load("r.vx", 'fn go() { let s = "x".repeat(1000000); "' + parts + '".len() }')
+    tracemalloc.start()
+    with pytest.raises(VexBudgetError) as e:
+        h.call("go", [])
+    peak = tracemalloc.get_traced_memory()[1]
+    tracemalloc.stop()
+    assert "r.vx:" in e.value.render()
+    assert peak < 3_000_000, f"interpolation allocated {peak} bytes before its budget stopped it"
+
+
+def test_interpolation_charges_exactly_the_text_it_produces() -> None:
+    h = Host()
+    h.budget(1_000_000)
+    h.load("r.vx", 'fn go() { let s = "ab"; "x{s}y{s}".len() }')
+    assert h.call("go", []) == 6
+    assert 1_000_000 - h.fuel_left() == 1 + 6  # the entry, then one unit per character of the result
 
 
 def test_find_still_stops_at_its_first_match_for_free_setup() -> None:

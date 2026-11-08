@@ -531,9 +531,12 @@ class VM:
                 elif op == BUILD_STR:
                     parts = stack[-arg:]
                     del stack[-arg:]
-                    built = "".join([p if type(p) is str else display(p, charge=self.charge) for p in parts])
-                    self.charge(len(built))
-                    push(built)
+                    pieces: list[str] = []
+                    for p in parts:  # each part's size is known here, so a stop comes before the join copies anything
+                        piece = p if type(p) is str else display(p, charge=self.charge)
+                        self.charge(len(piece))
+                        pieces.append(piece)
+                    push("".join(pieces))
                 elif op == TRY:
                     v = stack[-1]
                     if v.tag == 1:
