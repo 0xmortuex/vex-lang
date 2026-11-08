@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Iterator
 from typing import Any
@@ -23,11 +24,12 @@ MAX = "9223372036854775807"
 
 @pytest.fixture(autouse=True)
 def default_recursion_limit() -> Iterator[None]:
-    """cli.main raises the limit for the process; these tests depend on hitting the ordinary one."""
-    before = sys.getrecursionlimit()
+    """cli.main raises the limit and thread stack for the process; these tests depend on the ordinary ones."""
+    limit, stack = sys.getrecursionlimit(), threading.stack_size()
     sys.setrecursionlimit(1000)
     yield
-    sys.setrecursionlimit(before)
+    sys.setrecursionlimit(limit)
+    threading.stack_size(stack)
 
 
 def panics(body: str, fragment: str, prelude: str = "") -> VexRuntimeError:

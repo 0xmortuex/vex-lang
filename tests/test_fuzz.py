@@ -506,8 +506,12 @@ FINISHED_LINES = ["1", "let x = 1;", "fn f() {}", "// comment", "", ":help", '"a
 
 def gen_repl_scale(rng: random.Random) -> bytes:
     """Input whose only hostile property is its size, to expose a REPL that is not linear in it."""
-    if rng.random() < 0.7:
+    shape = rng.random()
+    if shape < 0.6:
         body = "(\n" * rng.choice([0, 1]) + (rng.choice(UNFINISHED_LINES) + "\n") * rng.choice([1000, 3000, 12_000])
+    elif shape < 0.8:  # every line grows the session, so per-input work proportional to the session is quadratic
+        template = rng.choice(["let x{} = 1;\n", "fn f{}() {{}}\n", "struct S{} {{}}\n"])
+        body = "".join(template.format(i) for i in range(rng.choice([6000, 24_000])))
     else:
         body = (rng.choice(FINISHED_LINES) + "\n") * rng.choice([1000, 3000, 6000])
     return body.encode("utf-8")
@@ -835,7 +839,7 @@ def test_every_builtin_survives_hostile_arguments(target: tuple[str, str, Builti
     sys.stdin = io.StringIO("")
     try:
         with fuzz_limits(), watchdog.timing(f"builtin {builtin.qual}"):
-            for _ in range(25):
+            for _ in range(40):
                 prog = compile_text(program_calling(kind, name, builtin, rng), "<audit>")
                 assert prog.main is not None
                 out = io.StringIO()
