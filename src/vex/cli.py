@@ -26,7 +26,7 @@ def _configure_streams() -> None:
             reconf(encoding="utf-8", newline="\n")
     reconf_in = getattr(sys.stdin, "reconfigure", None)
     if reconf_in is not None:
-        reconf_in(encoding="utf-8")
+        reconf_in(encoding="utf-8", errors="surrogateescape")  # readers report invalid UTF-8 themselves
 
 
 def _run_big_stack(call: Callable[[], int]) -> int:

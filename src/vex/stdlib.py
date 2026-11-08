@@ -10,7 +10,7 @@ from collections.abc import Callable
 from typing import Any
 
 from vex import syntax as ast
-from vex.diagnostics import DiagSink, Source
+from vex.diagnostics import DiagSink, Source, first_undecodable
 from vex.parser import Parser
 from vex.runtime import (
     INT_MAX,
@@ -523,6 +523,8 @@ def _write_file(path: str, text: str) -> Any:
 
 def _read_line() -> Any:
     line = sys.stdin.readline()
+    if first_undecodable(line) is not None:
+        raise VexPanic("standard input is not valid UTF-8")
     return NONE if line == "" else some(line.rstrip("\r\n"))
 
 

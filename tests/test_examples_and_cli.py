@@ -280,3 +280,23 @@ def test_valid_utf8_with_bom_and_crlf_still_reads(tmp_path: pathlib.Path) -> Non
     path = tmp_path / "ok.vx"
     path.write_bytes(b"\xef\xbb\xbffn main() {\r\n  print(\"caf\xc3\xa9\");\r\n}\r\n")
     assert read_source(str(path)).text == 'fn main() {\n  print("café");\n}\n'
+
+
+def run_with_stdin_bytes(args: list[str], data: bytes) -> subprocess.CompletedProcess[bytes]:
+    return subprocess.run([sys.executable, "-m", "vex", *args], input=data, capture_output=True, cwd=ROOT, timeout=120)
+
+
+def test_repl_on_a_pipe_reports_invalid_utf8() -> None:
+    proc = run_with_stdin_bytes(["repl"], b"\xff\n")
+    assert proc.returncode == 0, proc.stderr[-500:]
+    assert b"invalid-utf8" in proc.stdout
+    assert b"internal compiler error" not in proc.stderr
+
+
+def test_program_reading_invalid_utf8_stdin_gets_a_runtime_error(tmp_path: pathlib.Path) -> None:
+    path = tmp_path / "read.vx"
+    path.write_text("fn main() { print(io.read_line()); }\n", encoding="utf-8")
+    proc = run_with_stdin_bytes(["run", str(path)], b"\xff\n")
+    assert proc.returncode == 2, proc.stderr[-500:]
+    assert b"not valid UTF-8" in proc.stderr
+    assert b"internal compiler error" not in proc.stderr

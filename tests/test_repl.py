@@ -231,3 +231,40 @@ def test_cannot_infer_in_repl_is_a_diagnostic() -> None:
 )
 def test_is_incomplete(text: str, incomplete: bool) -> None:
     assert is_incomplete(text) is incomplete
+
+
+# ---------------------------------------------------------------- stdin that is not UTF-8
+def repl_on_bytes(data: bytes) -> tuple[int, str]:
+    """Drive the REPL through the same stream configuration the CLI gives stdin."""
+    stdin = io.TextIOWrapper(io.BytesIO(data), encoding="utf-8", errors="surrogateescape")
+    out = io.TextIOWrapper(io.BytesIO(), encoding="utf-8", newline="\n")
+    code = run_repl(stdin, out)
+    out.seek(0)
+    return code, out.buffer.getvalue().decode("utf-8")
+
+
+def test_invalid_utf8_line_is_a_positioned_diagnostic() -> None:
+    code, out = repl_on_bytes(b"1 + \xff\n")
+    assert code == 0
+    assert "invalid-utf8" in out and "<repl:1>:1:5" in out
+
+
+@pytest.mark.parametrize(
+    "data",
+    [b"\xff\n", b":\xff\n", b":type \xff\n", b'"\xc0\xaf"\n', b"\xed\xa0\x80\n", b"\xe2\x82"],
+    ids=["bare", "command", "type-command", "overlong-in-string", "surrogate", "truncated-at-eof"],
+)
+def test_invalid_utf8_never_crashes_the_repl(data: bytes) -> None:
+    code, out = repl_on_bytes(data)
+    assert code == 0
+    assert "invalid-utf8" in out
+
+
+def test_repl_keeps_working_after_invalid_utf8() -> None:
+    _, out = repl_on_bytes(b"\xff\n1 + 1\n")
+    assert "invalid-utf8" in out and "2 : Int" in out
+
+
+def test_invalid_utf8_discards_the_unfinished_input() -> None:
+    _, out = repl_on_bytes(b"(\n\xff\n1 + 1\n")
+    assert "invalid-utf8" in out and "2 : Int" in out

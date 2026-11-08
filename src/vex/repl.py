@@ -6,7 +6,7 @@ from typing import TextIO
 
 from vex.checker import Checker
 from vex.compiler import Compiler
-from vex.diagnostics import DiagSink, Source, VexError, VexRuntimeError, render_all
+from vex.diagnostics import DiagSink, Source, VexError, VexRuntimeError, first_undecodable, render_all
 from vex.lexer import Lexer
 from vex.parser import parse_source
 from vex.resolver import Resolver, make_env
@@ -37,6 +37,15 @@ def is_incomplete(text: str) -> bool:
         elif t.kind in (")", "]", "}"):
             depth -= 1
     return depth > 0
+
+
+def _source_of_input(path: str, text: str) -> Source:
+    """A Source for one input; bytes stdin could not decode become a positioned diagnostic in parse_source."""
+    bad = first_undecodable(text)
+    if bad is None:
+        return Source(path, text)
+    clean = text.translate({c: 0xFFFD for c in range(0xDC80, 0xDD00)})
+    return Source(path, clean, decode_error=(bad, ord(text[bad]) - 0xDC00))
 
 
 def _snapshot(e: Env) -> tuple[object, ...]:
@@ -70,7 +79,7 @@ class Session:
         VexRuntimeError for runtime errors and VexExit when the program calls exit().
         """
         self.count += 1
-        source = Source(f"<repl:{self.count}>", text)
+        source = _source_of_input(f"<repl:{self.count}>", text)
         sink = DiagSink()
         mod = parse_source(source, sink, repl=True)
         sink.raise_if_errors()
@@ -129,6 +138,10 @@ def run_repl(stdin: TextIO, stdout: TextIO) -> int:
                 stdout.write("\n")
             break
         line = line.rstrip("\r\n")
+        if first_undecodable(line) is not None:
+            pending = ""
+            session.handle(line)
+            continue
         if not pending and line.strip().startswith(":"):
             cmd, _, rest = line.strip().partition(" ")
             if cmd in (":quit", ":q", ":exit"):

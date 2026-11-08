@@ -33,6 +33,14 @@ class Source:
         return self.text[start:end].rstrip("\r")
 
 
+def first_undecodable(text: str) -> int | None:
+    """Offset of the first byte that stdin's surrogateescape handler could not decode as UTF-8."""
+    for i, ch in enumerate(text):
+        if "\udc80" <= ch <= "\udcff":
+            return i
+    return None
+
+
 @dataclass(frozen=True)
 class Span:
     source: Source
