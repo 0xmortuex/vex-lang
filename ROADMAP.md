@@ -114,7 +114,11 @@ there is no direct path in either direction; Mort could only spawn `vex` as a su
 
 ### 3. Python exceptions and out-of-range values escape at runtime
 
-- **Missing:** `VM.run_function` converts only `VexPanic` and `RecursionError`.
+- **Status:** Closed on `fix/lexer-fuzz-crashes`. Every row in the table now gives a located runtime error, an `Err` or an
+  IEEE value; see `tests/test_hostile_runtime.py`, and `test_every_builtin_survives_hostile_arguments` in `tests/test_fuzz.py`,
+  which calls all 124 builtins. Still open: the misleading `cannot-infer` and the `Eq` gap under "Lesser issues"; `==` on
+  values that share substructure exponentially is not bounded (it takes exponential time without allocating, like any loop).
+- **Missing (as audited):** `VM.run_function` converts only `VexPanic` and `RecursionError`.
 - **Why it matters:** Each of these was run through the CLI. The first six rows exit 70, an internal error, instead of a Vex runtime error.
 
   | Program | Result |
