@@ -16,6 +16,11 @@ if TYPE_CHECKING:
 INT_MIN = -(2**63)
 INT_MAX = 2**63 - 1
 
+# The largest Str and List one operation may build. Allocating is the one thing a single VM instruction
+# can do without limit, so operations whose result is not bounded by their arguments' sizes check these first.
+MAX_STR_LEN = 50_000_000
+MAX_LIST_LEN = 10_000_000
+
 
 class VexPanic(Exception):
     """A runtime error raised by a builtin or the VM; the VM attaches the stack trace."""
@@ -236,7 +241,8 @@ def display(v: Any, top: bool = True, charge: Callable[[int], None] | None = Non
     """Format a value the way ``print`` and string interpolation do.
 
     Without recursion, so nesting cannot exhaust the Python stack, and spending budget as text is produced.
-    Printing a value that contains itself is a runtime error.
+    Printing a value that contains itself is a runtime error. Shared substructure can make the text exponentially
+    longer than the value is big, so the text itself is limited to MAX_STR_LEN characters.
     """
     if v is None or type(v) in (bool, int, float):
         return _scalar_text(v)
@@ -247,41 +253,48 @@ def display(v: Any, top: bool = True, charge: Callable[[int], None] | None = Non
     out: list[str] = []
     on_path: set[int] = set()
     work: list[tuple[Any, int]] = [(v, _TOP if top else _NESTED)]
+    room = MAX_STR_LEN
     while work:
         x, mode = work.pop()
-        if mode == _TEXT:
-            out.append(x)
-            continue
         if mode == _LEAVE:
             on_path.discard(x)
             continue
-        spend(1)
-        t = type(x)
-        if x is None or t in (bool, int, float):
-            out.append(_scalar_text(x))
-        elif t is str:
-            spend(len(x))
-            out.append(x if mode == _TOP else quote(x))
-        elif t is list or t is tuple or t is dict:
-            spend((6 if t is dict else 3) * len(x))  # each element pushes two or more work items below
-            _push_container(work, x, t)
-        elif t is Adt:
-            spend(len(x.f))
-            if x.f:
-                key = id(x)
-                if key in on_path:
-                    raise VexPanic(_CYCLIC_DISPLAY)
-                on_path.add(key)
-                work.append((key, _LEAVE))
-            _push_adt(work, x)
-        elif t is range:
-            out.append(f"{x.start}..{x.stop}")
-        elif t is Closure:
-            out.append(f"<fn {x.code.name}>")
-        elif t is BuiltinFn:
-            out.append(f"<builtin {x.name}>")
+        if mode == _TEXT:
+            text = x
         else:
-            out.append(str(x))
+            spend(1)
+            t = type(x)
+            if x is None or t in (bool, int, float):
+                text = _scalar_text(x)
+            elif t is str:
+                spend(len(x))
+                text = x if mode == _TOP else quote(x)
+            elif t is list or t is tuple or t is dict:
+                spend((6 if t is dict else 3) * len(x))  # each element pushes two or more work items below
+                _push_container(work, x, t)
+                continue
+            elif t is Adt:
+                spend(len(x.f))
+                if x.f:
+                    key = id(x)
+                    if key in on_path:
+                        raise VexPanic(_CYCLIC_DISPLAY)
+                    on_path.add(key)
+                    work.append((key, _LEAVE))
+                _push_adt(work, x)
+                continue
+            elif t is range:
+                text = f"{x.start}..={x.stop - 1}" if x.stop > INT_MAX else f"{x.start}..{x.stop}"
+            elif t is Closure:
+                text = f"<fn {x.code.name}>"
+            elif t is BuiltinFn:
+                text = f"<builtin {x.name}>"
+            else:
+                text = str(x)
+        room -= len(text)
+        if room < 0:
+            raise VexPanic(f"value is too large to display (over {MAX_STR_LEN} characters)")
+        out.append(text)
     return "".join(out)
 
 

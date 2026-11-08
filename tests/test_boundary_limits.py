@@ -19,6 +19,7 @@ from vex.diagnostics import VexRuntimeError
 from vex.embed import HOST_FN, VexValue
 from vex.host import MAX_HOST_DEPTH, Host, VexBindingError, VexBudgetError
 from vex.runtime import NONE, Adt, AdtInfo, display, values_equal
+from vex.stdlib import METHODS, NAMESPACES
 from vex.vm import VM
 
 TREE = "enum T { Leaf, Node(T, T) }\n"
@@ -202,7 +203,12 @@ def test_map_recursion_past_the_limit_is_a_located_error() -> None:
     assert "r.vx:2:" in e.value.render()
 
 
-def test_embedded_internal_failure_is_located() -> None:
+def test_embedded_internal_failure_is_located(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Range.len now checks the 64-bit contract itself, so force the Python error to exercise this path.
+    def overflow(r: range) -> int:
+        raise OverflowError("Python int too large to convert to C ssize_t")
+
+    monkeypatch.setattr(METHODS["Range"]["len"], "impl", overflow)
     h = Host()
     h.load("r.vx", "fn go() {\n  (math.INT_MIN..math.INT_MAX).len()\n}")
     with pytest.raises(VexRuntimeError) as e:
@@ -218,7 +224,9 @@ def test_surrogate_to_char_is_a_located_runtime_error() -> None:
     assert "not a valid code point" in e.value.message and "r.vx:2:" in e.value.render()
 
 
-def test_invalid_result_error_is_located_at_the_function() -> None:
+def test_invalid_result_error_is_located_at_the_function(monkeypatch: pytest.MonkeyPatch) -> None:
+    # gcd now checks the 64-bit contract itself, so force an out-of-range value through to the result check.
+    monkeypatch.setattr(NAMESPACES["math"]["gcd"], "impl", lambda a, b: 2**63)
     h = Host()
     h.load("r.vx", "fn go() -> Int {\n  math.gcd(math.INT_MIN, 0)\n}")
     with pytest.raises(VexRuntimeError) as e:

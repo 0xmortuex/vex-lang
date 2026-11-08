@@ -7,6 +7,7 @@ import sys
 from typing import Any, TextIO
 
 from vex import bytecode as bc
+from vex import runtime
 from vex.bytecode import (
     ADD_F,
     ADD_I,
@@ -104,6 +105,9 @@ CLOSURE_COST = 2
 MAP_BASE_COST = 8
 _FLAT = frozenset({int, float, bool, type(None)})
 _DONE = object()
+_TOO_DEEP = "recursion too deep (a deeply nested value, or calls nested through builtins such as `map`)"
+_OUT_OF_MEMORY = "out of memory"
+_RESERVE_BYTES = 1024 * 1024  # room for reporting out of memory when values that cannot be released fill the heap
 
 
 class VM:
@@ -114,6 +118,11 @@ class VM:
         self.args = args or []
         self.frames: list[tuple[Code, int, list[Any], list[Any]]] = []
         self.globals: dict[str, Any] = {}
+        self.reserve: bytearray | None = bytearray(_RESERVE_BYTES)
+        self._oom_code: Code | None = None  # the instruction that ran out of memory
+        self._oom_pc = 0
+        self._oom_pushed = False  # that instruction's own frame is on the frame list (a builtin given the VM)
+        self._oom_error = VexRuntimeError(_OUT_OF_MEMORY)  # built now: the last resort needs no allocation
         # Units left in the current embedded call. Infinite for programs outside an embedding.
         self.fuel: float = math.inf
         self.embedded = False  # an embedded VM caps callback nesting and locates internal failures
@@ -174,6 +183,13 @@ class VM:
         """Run a top-level function to completion, converting failures to VexRuntimeError."""
         args = args or []
         locals_ = list(args) + [None] * (code.nlocals - len(args))
+        args = None  # locals_ holds them now, and must be the only thing that does when memory runs out
+        self._oom_code = None
+        if self.reserve is None:
+            try:
+                self.reserve = bytearray(_RESERVE_BYTES)
+            except MemoryError:  # still full; the report falls back on the error built in __init__
+                pass
         try:
             return self.execute(code, locals_)
         except VexPanic as e:
@@ -182,7 +198,41 @@ class VM:
             raise VexRuntimeError(e.message, trace) from None
         except RecursionError:
             self.frames.clear()
-            raise VexRuntimeError("recursion too deep while comparing or printing a value") from None
+            raise VexRuntimeError(_TOO_DEEP) from None
+        except MemoryError as e:
+            e.__traceback__ = None  # its frames pin every Python local of the failed `execute` calls
+            locals_.clear()
+            raise self._report_out_of_memory() from None
+
+    def _report_out_of_memory(self) -> VexRuntimeError:
+        """Release the failed program's values, then describe where it failed. Runs with the heap full."""
+        frames = self.frames
+        for frame in frames:  # (code, pc, locals, stack); the trace only needs the first two
+            frame[2].clear()
+            frame[3].clear()
+        code, pc = self._oom_code, self._oom_pc
+        self._oom_code = None
+        try:
+            outer = frames[:-1] if self._oom_pushed else frames
+            error = VexRuntimeError(_OUT_OF_MEMORY, self.make_trace(code, pc - 1, outer) if code is not None else [])
+        except MemoryError:  # values that cannot be released (REPL globals) still fill the heap
+            error = self._oom_error
+            error.__traceback__ = None
+        frames.clear()
+        return error
+
+    def show_result(self, code: Code, value: Any) -> str:
+        """Format the value of a finished REPL input; a failure is located at that input, as a panic would be."""
+        try:
+            return display(value, False)
+        except VexPanic as e:
+            message = e.message
+        except RecursionError:
+            message = _TOO_DEEP
+        except MemoryError:
+            self.reserve = None
+            message = _OUT_OF_MEMORY
+        raise VexRuntimeError(message, [(code.name, _span_at(code, len(code.spans) - 1))])
 
     def make_trace(self, code: Code, pc: int, frames: list[Any]) -> list[tuple[str, Span | None]]:
         trace: list[tuple[str, Span | None]] = [(code.name, _span_at(code, pc))]
@@ -274,7 +324,9 @@ class VM:
                     pc = arg
                 elif op == LT:
                     b = pop()
-                    if type(b) in _FLAT:
+                    if b is None:  # Unit is Ord, with its single value equal to itself, but Python's None is not
+                        stack[-1] = False
+                    elif type(b) in _FLAT:
                         stack[-1] = stack[-1] < b
                     else:
                         stack[-1] = self._order(LT, stack[-1], b)
@@ -318,21 +370,27 @@ class VM:
                     push(locals_[arg].v)
                 elif op == POP:
                     pop()
-                elif op == LE:
+                elif op == LE:  # Unit is Ord, with its single value equal to itself, but Python's None is not
                     b = pop()
-                    if type(b) in _FLAT:
+                    if b is None:
+                        stack[-1] = True
+                    elif type(b) in _FLAT:
                         stack[-1] = stack[-1] <= b
                     else:
                         stack[-1] = self._order(LE, stack[-1], b)
                 elif op == GT:
                     b = pop()
-                    if type(b) in _FLAT:
+                    if b is None:
+                        stack[-1] = False
+                    elif type(b) in _FLAT:
                         stack[-1] = stack[-1] > b
                     else:
                         stack[-1] = self._order(GT, stack[-1], b)
                 elif op == GE:
                     b = pop()
-                    if type(b) in _FLAT:
+                    if b is None:
+                        stack[-1] = True
+                    elif type(b) in _FLAT:
                         stack[-1] = stack[-1] >= b
                     else:
                         stack[-1] = self._order(GE, stack[-1], b)
@@ -461,7 +519,8 @@ class VM:
                     b = pop()
                     if b == 0.0:
                         raise VexPanic("division by zero in `%`")
-                    stack[-1] = math.fmod(stack[-1], b)
+                    a = stack[-1]
+                    stack[-1] = math.fmod(a, b) if math.isfinite(a) else math.nan
                 elif op == NEG_F:
                     stack[-1] = -stack[-1]
                 elif op == NEG_I:
@@ -471,9 +530,14 @@ class VM:
                     stack[-1] = r
                 elif op == ADD_S:
                     b = pop()
-                    self.charge(len(stack[-1]) + len(b))
-                    stack[-1] = stack[-1] + b
+                    a = stack[-1]
+                    if len(a) + len(b) > runtime.MAX_STR_LEN:
+                        raise VexPanic("string too large")
+                    self.charge(len(a) + len(b))
+                    stack[-1] = a + b
                 elif op == MAKE_LIST:
+                    if arg > runtime.MAX_LIST_LEN:
+                        raise VexPanic(f"list too large ({arg} elements, the limit is {runtime.MAX_LIST_LEN})")
                     self.charge(1 + arg)
                     if arg:
                         items = stack[-arg:]
@@ -487,6 +551,8 @@ class VM:
                     del stack[-arg:]
                     push(tuple(items))
                 elif op == MAKE_MAP:
+                    if arg > runtime.MAX_LIST_LEN:
+                        raise VexPanic(f"map too large ({arg} entries, the limit is {runtime.MAX_LIST_LEN})")
                     self.charge(MAP_BASE_COST + 2 * arg)
                     n2 = arg * 2
                     flat = stack[-n2:] if n2 else []
@@ -546,9 +612,13 @@ class VM:
                     parts = stack[-arg:]
                     del stack[-arg:]
                     pieces: list[str] = []
+                    size = 0
                     for p in parts:  # each part's size is known here, so a stop comes before the join copies anything
                         piece = p if type(p) is str else display(p, charge=self.charge)
                         self.charge(len(piece))
+                        size += len(piece)
+                        if size > runtime.MAX_STR_LEN:
+                            raise VexPanic("string too large")
                         pieces.append(piece)
                     push("".join(pieces))
                 elif op == TRY:
@@ -573,7 +643,10 @@ class VM:
                         cap = []
                     push(Closure(fcode, cap))
                 elif op == LOAD_GLOBAL:
-                    push(self.globals[arg])
+                    try:
+                        push(self.globals[arg])
+                    except KeyError:  # an earlier REPL input panicked before this `let` ran
+                        raise VexPanic(f"`{arg.partition('#')[0]}` has no value: its `let` did not finish") from None
                 elif op == STORE_GLOBAL:
                     self.globals[arg] = pop()
                 elif op == PANIC:
@@ -586,11 +659,31 @@ class VM:
             raise
         except VexExit:
             raise
+        except RecursionError:
+            # One of the two deliberate last-resort boundaries. These are not hostile arguments to one builtin:
+            # comparing or calling back can recurse, and any instruction can allocate, wherever the Python stack
+            # or the heap happens to run out. Catching them here is what locates them.
+            # The trace may hit the same limit; the next `execute` out, with more stack, then handles it.
+            panic = VexPanic(_TOO_DEEP)
+            panic.trace = self._located_trace(code, pc, locals_, frames)
+            raise panic from None
+        except MemoryError:
+            self.reserve = None
+            if self.embedded:  # Host.call has no run_function behind it, and the host keeps its heap anyway
+                panic = VexPanic(_OUT_OF_MEMORY)
+                panic.trace = self._located_trace(code, pc, locals_, frames)
+                raise panic from None
+            # Nothing can be built yet: this activation's locals pin the program's values. Note the innermost
+            # instruction (no allocation), and let run_function report once they are gone.
+            if self._oom_code is None:
+                self._oom_code = code
+                self._oom_pc = pc
+                self._oom_pushed = bool(frames) and frames[-1][2] is locals_
+            raise
         except Exception as e:
             if not self.embedded:
                 raise
-            what = "recursion too deep" if isinstance(e, RecursionError) else f"internal error: {type(e).__name__}: {e}"
-            panic = VexPanic(what)
+            panic = VexPanic(f"internal error: {type(e).__name__}: {e}")
             panic.trace = self._located_trace(code, pc, locals_, frames)
             raise panic from None
 

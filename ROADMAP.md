@@ -114,7 +114,11 @@ there is no direct path in either direction; Mort could only spawn `vex` as a su
 
 ### 3. Python exceptions and out-of-range values escape at runtime
 
-- **Missing:** `VM.run_function` converts only `VexPanic` and `RecursionError`.
+- **Status:** Closed on `fix/lexer-fuzz-crashes`. Every row in the table now gives a located runtime error, an `Err` or an
+  IEEE value; see `tests/test_hostile_runtime.py`, and `test_every_builtin_survives_hostile_arguments` in `tests/test_fuzz.py`,
+  which calls all 124 builtins. Still open: the misleading `cannot-infer` and the `Eq` gap under "Lesser issues"; `==` on
+  values that share substructure exponentially is not bounded (it takes exponential time without allocating, like any loop).
+- **Missing (as audited):** `VM.run_function` converts only `VexPanic` and `RecursionError`.
 - **Why it matters:** Each of these was run through the CLI. The first six rows exit 70, an internal error, instead of a Vex runtime error.
 
   | Program | Result |
@@ -237,6 +241,17 @@ there is no direct path in either direction; Mort could only spawn `vex` as a su
 - **Size:** 6-10 h.
 - **Depends on:** nothing.
 - **Files:** `src/vex/resolver.py`, `src/vex/checker.py`, `tests/errors/`.
+
+### 16. Super-linear time after parsing on large inputs
+
+- **Missing:** Later compile stages take super-linear time on some large but valid-looking inputs. Measured during
+  verification of the lexer and parser fuzz work: 12,500 duplicate `match` arms took over 30 s, and a 10,000-variant
+  enum in an 89 KB file took 9.6 s.
+- **Why it matters:** A small file can occupy the compiler for tens of seconds. The hostile fuzz does not reach this,
+  because its inputs are too small and its limit is per input.
+- **Size:** Not estimated. Profile both inputs first; this is separate from the exponential cases in gap 7.
+- **Depends on:** nothing.
+- **Files:** Not yet identified; start with `src/vex/exhaust.py` and `src/vex/checker.py`.
 
 ## What Vex is distinctive at, compared with Mort (facts only)
 

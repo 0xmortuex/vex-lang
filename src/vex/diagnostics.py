@@ -7,13 +7,16 @@ import difflib
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 
+MAX_SNIPPET_WIDTH = 200  # a longer source line is shown as a window around the error
+
 
 class Source:
     """A source file: path, text and a line-start table for offset -> line:col."""
 
-    def __init__(self, path: str, text: str) -> None:
+    def __init__(self, path: str, text: str, decode_error: tuple[int, int] | None = None) -> None:
         self.path = path
         self.text = text
+        self.decode_error = decode_error  # (text offset, byte value) of the first byte that is not UTF-8
         self._starts = [0]
         for i, ch in enumerate(text):
             if ch == "\n":
@@ -30,6 +33,28 @@ class Source:
         start = self._starts[line - 1]
         end = self._starts[line] - 1 if line < len(self._starts) else len(self.text)
         return self.text[start:end].rstrip("\r")
+
+    def line_excerpt(self, line: int, col: int) -> tuple[str, int, bool]:
+        """Up to MAX_SNIPPET_WIDTH characters of a line around ``col``: (text, col within it, was it clipped)."""
+        if line < 1 or line > len(self._starts):
+            return "", col, False
+        start = self._starts[line - 1]
+        end = self._starts[line] - 1 if line < len(self._starts) else len(self.text)
+        if end - start <= MAX_SNIPPET_WIDTH:
+            return self.line_text(line), col, False
+        first = max(start, min(start + col - 1 - MAX_SNIPPET_WIDTH // 2, end - MAX_SNIPPET_WIDTH))
+        last = min(end, first + MAX_SNIPPET_WIDTH)
+        prefix = "..." if first > start else ""
+        suffix = "..." if last < end else ""
+        return f"{prefix}{self.text[first:last]}{suffix}", start + col - first + len(prefix), True
+
+
+def first_undecodable(text: str) -> int | None:
+    """Offset of the first byte that stdin's surrogateescape handler could not decode as UTF-8."""
+    for i, ch in enumerate(text):
+        if "\udc80" <= ch <= "\udcff":
+            return i
+    return None
 
 
 @dataclass(frozen=True)
@@ -81,14 +106,14 @@ class Diagnostic:
 
 def _snippet(span: Span, label: str, primary: bool) -> str:
     line, col = span.source.line_col(span.start)
-    text = span.source.line_text(line)
+    text, shown_col, clipped = span.source.line_excerpt(line, col)
     end_line, end_col = span.source.line_col(max(span.start, span.end - 1))
-    width = (end_col - col + 1) if end_line == line else max(1, len(text) - col + 1)
-    width = max(1, width)
+    width = (end_col - col + 1) if end_line == line else max(1, len(text) - shown_col + 1)
+    width = max(1, min(width, len(text) - shown_col + 1) if clipped else width)
     num = str(line)
     pad = " " * len(num)
     # Keep tabs so the caret lines up under the source text.
-    lead = "".join("\t" if c == "\t" else " " for c in text[: col - 1])
+    lead = "".join("\t" if c == "\t" else " " for c in text[: shown_col - 1])
     mark = ("^" if primary else "-") * width
     arrow = "-->" if primary else ":::"
     lines = [
@@ -106,6 +131,25 @@ class VexError(Exception):
     def __init__(self, diagnostics: list[Diagnostic]) -> None:
         super().__init__(render_all(diagnostics))
         self.diagnostics = diagnostics
+
+
+def too_deep_error(exc: RecursionError, source: Source) -> VexError:
+    """A too-deep diagnostic at the innermost syntax node that was being processed when ``exc`` was raised."""
+    span = Span(source, 0, 1)
+    tb = exc.__traceback__
+    while tb is not None:
+        for value in tb.tb_frame.f_locals.values():
+            candidate = getattr(value, "span", None)
+            if isinstance(candidate, Span):
+                span = candidate
+                break
+        tb = tb.tb_next
+    return VexError([Diagnostic("too-deep", "program is nested too deeply to compile", span,
+                                "simplify the deepest expression")])  # fmt: skip
+
+
+def out_of_memory_error(source: Source) -> VexError:
+    return VexError([Diagnostic("out-of-memory", "not enough memory to compile this program", Span(source, 0, 1))])
 
 
 class VexRuntimeError(Exception):

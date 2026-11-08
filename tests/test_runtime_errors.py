@@ -5,7 +5,8 @@ from __future__ import annotations
 import pytest
 from helpers import run_body, run_source
 
-from vex.diagnostics import VexRuntimeError
+from vex.api import compile_text
+from vex.diagnostics import VexError, VexRuntimeError
 from vex.runtime import VexExit
 
 # (id, body, expected message fragment)
@@ -134,3 +135,9 @@ print(4611686018427387903 * 2);
 print(3037000499 * 3037000499);
 """
     assert run_body(body) == "9223372036854775807\n-9223372036854775808\n9223372036854775806\n9223372030926249001\n"
+
+
+def test_surrogate_escape_never_reaches_the_runtime() -> None:
+    with pytest.raises(VexError) as info:
+        compile_text(r'fn main() { print("\u{D800}"); }', "<t>")
+    assert [d.code for d in info.value.diagnostics] == ["bad-escape"]

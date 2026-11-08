@@ -365,3 +365,7 @@ fn main() {
 
 def test_unused_tuple_swap_compiles() -> None:
     assert run_body("let (mut a, mut b) = (1, 2); a += 10; b += 20; print(a + b);") == "33\n"
+
+
+def test_tuple_index_with_thousands_of_leading_zeros() -> None:
+    assert run_body("print((1, 2)." + "0" * 5000 + "1);") == "2\n"

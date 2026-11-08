@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import codecs
 import os
 from dataclasses import dataclass, field
 
@@ -9,7 +10,7 @@ from vex import syntax as ast
 from vex.bytecode import Code, all_code, disassemble
 from vex.checker import Checker
 from vex.compiler import Compiler
-from vex.diagnostics import Diagnostic, DiagSink, Source, Span, VexError
+from vex.diagnostics import Diagnostic, DiagSink, Source, VexError, out_of_memory_error, too_deep_error
 from vex.parser import parse_source
 from vex.resolver import Resolver, make_env
 from vex.symbols import Env, FnSym, Scope
@@ -30,9 +31,19 @@ class Program:
 
 
 def read_source(path: str) -> Source:
-    with open(path, encoding="utf-8-sig", newline="") as fh:
-        text = fh.read()
-    return Source(path, text.replace("\r\n", "\n"))
+    try:
+        with open(path, "rb") as fh:
+            raw = fh.read()
+    except MemoryError:
+        raise OSError("file is too large to read") from None
+    if raw.startswith(codecs.BOM_UTF8):
+        raw = raw[len(codecs.BOM_UTF8) :]
+    try:
+        return Source(path, raw.decode("utf-8").replace("\r\n", "\n"))
+    except UnicodeDecodeError as e:
+        offset = len(raw[: e.start].decode("utf-8").replace("\r\n", "\n"))
+        text = raw.decode("utf-8", errors="replace").replace("\r\n", "\n")
+        return Source(path, text, decode_error=(offset, raw[e.start]))
 
 
 class Loader:
@@ -85,7 +96,7 @@ class Loader:
             return
         try:
             src = read_source(path)
-        except (OSError, UnicodeDecodeError) as e:
+        except OSError as e:
             self.sink.error("import-unreadable", f"cannot read module `{name}`: {e}", imp.span)
             return
         self.load(src, key)
@@ -118,9 +129,11 @@ def compile_source(
     """Compile a source file (and its imports). Raises VexError with all diagnostics."""
     try:
         return _compile(source, require_main, scope, allow_imports)
-    except RecursionError:
-        raise VexError([Diagnostic("too-deep", "program is nested too deeply to compile",
-                                   Span(source, 0, 1), "simplify the deepest expression")]) from None  # fmt: skip
+    except RecursionError as e:
+        raise too_deep_error(e, source) from None
+    except MemoryError as e:
+        e.__traceback__ = None  # its frames pin the tokens and syntax tree that filled the heap
+        raise out_of_memory_error(source) from None
 
 
 def _compile(

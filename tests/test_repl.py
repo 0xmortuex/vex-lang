@@ -3,11 +3,17 @@
 from __future__ import annotations
 
 import io
+import random
+import sys
+import time
+from types import FrameType
+from typing import Any
 
 import pytest
 
-from vex.diagnostics import VexError, VexRuntimeError
-from vex.repl import Session, is_incomplete, run_repl
+from vex.diagnostics import DiagSink, Source, VexError, VexRuntimeError
+from vex.lexer import Lexer
+from vex.repl import Continuation, Session, is_incomplete, run_repl
 
 
 def session() -> tuple[Session, io.StringIO]:
@@ -231,3 +237,210 @@ def test_cannot_infer_in_repl_is_a_diagnostic() -> None:
 )
 def test_is_incomplete(text: str, incomplete: bool) -> None:
     assert is_incomplete(text) is incomplete
+
+
+# ---------------------------------------------------------------- stdin that is not UTF-8
+def repl_on_bytes(data: bytes) -> tuple[int, str]:
+    """Drive the REPL through the same stream configuration the CLI gives stdin."""
+    stdin = io.TextIOWrapper(io.BytesIO(data), encoding="utf-8", errors="surrogateescape")
+    out = io.TextIOWrapper(io.BytesIO(), encoding="utf-8", newline="\n")
+    code = run_repl(stdin, out)
+    out.seek(0)
+    return code, out.buffer.getvalue().decode("utf-8")
+
+
+def test_invalid_utf8_line_is_a_positioned_diagnostic() -> None:
+    code, out = repl_on_bytes(b"1 + \xff\n")
+    assert code == 0
+    assert "invalid-utf8" in out and "<repl:1>:1:5" in out
+
+
+@pytest.mark.parametrize(
+    "data",
+    [b"\xff\n", b":\xff\n", b":type \xff\n", b'"\xc0\xaf"\n', b"\xed\xa0\x80\n", b"\xe2\x82"],
+    ids=["bare", "command", "type-command", "overlong-in-string", "surrogate", "truncated-at-eof"],
+)
+def test_invalid_utf8_never_crashes_the_repl(data: bytes) -> None:
+    code, out = repl_on_bytes(data)
+    assert code == 0
+    assert "invalid-utf8" in out
+
+
+def test_repl_keeps_working_after_invalid_utf8() -> None:
+    _, out = repl_on_bytes(b"\xff\n1 + 1\n")
+    assert "invalid-utf8" in out and "2 : Int" in out
+
+
+def test_invalid_utf8_discards_the_unfinished_input() -> None:
+    _, out = repl_on_bytes(b"(\n\xff\n1 + 1\n")
+    assert "invalid-utf8" in out and "2 : Int" in out
+
+
+def test_too_deep_input_is_a_diagnostic_and_keeps_the_session() -> None:
+    out = io.StringIO()
+    session = Session(out)
+    session.handle("let keep = 41;")
+    session.handle("\n" + "+".join(["1"] * 40_000))
+    assert "too-deep" in out.getvalue() and "<repl:2>:2:1" in out.getvalue()
+    session.handle("keep + 1")
+    assert "42 : Int" in out.getvalue()
+
+
+# ---------------------------------------------------------------- deciding "needs another line"
+class UncappedSink(DiagSink):
+    MAX_ERRORS = 10**9
+
+
+def lexer_says_incomplete(text: str) -> bool:
+    """The definition: what the real lexer reports for the whole text at once."""
+    sink = UncappedSink()
+    toks = Lexer(Source("<repl>", text), sink).lex()
+    if any(d.code.startswith("unterminated") for d in sink.items):
+        return True
+    opens = sum(t.kind in ("(", "[", "{", "#{") for t in toks)
+    closes = sum(t.kind in (")", "]", "}") for t in toks)
+    return opens > closes
+
+
+BS = chr(92)
+QUOTE = chr(34)
+FRAGMENTS = [
+    "(", ")", "[", "]", "{", "}", "#{", QUOTE, BS + QUOTE, BS, BS + "u", BS + "u{", BS + "n", "/", "*", "/*", "*/", "//",
+    "x", "1", "1e", "0x", "a b", chr(0xE9), chr(0xB2), "@", "#", " ", chr(9), "}" + QUOTE, "{" + QUOTE, QUOTE + "{",
+    "/*/", "*/*", BS + BS, "..", "/=", chr(0xFEFF),
+]  # fmt: skip
+
+
+@pytest.mark.parametrize("seed", range(400))
+def test_line_by_line_decision_agrees_with_the_lexer(seed: int) -> None:
+    rng = random.Random(f"continuation/{seed}")
+    lines = ["".join(rng.choice(FRAGMENTS) for _ in range(rng.randint(0, 9))) for _ in range(rng.randint(1, 6))]
+    continuation = Continuation()
+    for i, line in enumerate(lines):
+        continuation.feed("\n" + line if i else line)
+        assert continuation.incomplete is lexer_says_incomplete("\n".join(lines[: i + 1])), lines[: i + 1]
+
+
+def test_unterminated_string_after_many_other_errors_still_continues() -> None:
+    assert is_incomplete("@ " * 60 + '"abc') is True
+
+
+UNFINISHED_SHAPES = {
+    "paren": "(",
+    "brackets": "[",
+    "map": "#{",
+    "string": '"abc',
+    "comment": "/* abc",
+    "line-comment-in-parens": "( // abc",
+    "blank-in-parens": "",
+    "interpolation": '"{',
+    "string-in-interpolation": '"{"abc',
+    "unicode-escape": QUOTE + BS + "u{",
+    "trailing-escape": QUOTE + BS,
+}
+
+
+def calls_made(script: str) -> int:
+    """Python-level function calls made while the REPL reads ``script``: deterministic, unlike a stopwatch."""
+    count = 0
+
+    def profiler(frame: FrameType, event: str, arg: Any) -> None:
+        nonlocal count
+        count += event in ("call", "c_call")
+
+    sys.setprofile(profiler)
+    try:
+        run_repl(io.StringIO(script), io.StringIO())
+    finally:
+        sys.setprofile(None)
+    return count
+
+
+def unfinished_script(shape: str, lines: int) -> str:
+    # Opening the input first keeps the blank-line shape from being skipped as "nothing typed yet".
+    first = "(\n" if shape == "blank-in-parens" else ""
+    return first + (UNFINISHED_SHAPES[shape] + "\n") * lines
+
+
+@pytest.mark.parametrize("shape", UNFINISHED_SHAPES)
+def test_reading_unfinished_input_scales_linearly(shape: str) -> None:
+    small, large = calls_made(unfinished_script(shape, 150)), calls_made(unfinished_script(shape, 600))
+    assert large < small * 5.5, f"4x the lines took {large / small:.1f}x the work"
+
+
+@pytest.mark.parametrize("shape", UNFINISHED_SHAPES)
+def test_unfinished_input_of_3000_lines_is_fast(shape: str) -> None:
+    started = time.monotonic()
+    run_repl(io.StringIO(unfinished_script(shape, 3000)), io.StringIO())
+    assert time.monotonic() - started < 2.0
+
+
+def test_input_finished_after_many_lines_still_runs() -> None:
+    assert feed("[\n" + "1,\n" * 2000 + "].len()\n") == "2000 : Int\n"
+
+
+def test_invalid_utf8_resets_the_line_by_line_decision() -> None:
+    _, out = repl_on_bytes(b'"abc\n\xff\n1 + 1\n')
+    assert "invalid-utf8" in out and "2 : Int" in out
+
+
+# ---------------------------------------------------------------- a long session and its rollback
+def test_many_definitions_do_not_make_each_input_slower() -> None:
+    script = "".join(f"let x{i} = 1;\n" for i in range(32_000))
+    started = time.monotonic()
+    run_repl(io.StringIO(script), io.StringIO())
+    assert time.monotonic() - started < 20.0
+
+
+def fingerprint(s: Session) -> tuple[object, ...]:
+    """Which objects every table of the environment holds (rollback restores these exactly)."""
+    e = s.env
+    tables = (e.structs, e.enums, e.fns, e.methods, e.globals, e.decl_spans)
+    return (
+        tuple({k: id(v) for k, v in t.items()} for t in tables),
+        {k: [id(v) for v in vs] for k, vs in e.variants.items()},
+        [id(f) for f in e.fn_list],
+    )
+
+
+FAILING_INPUTS = [
+    'fn broken() -> Int { "s" }',
+    'let keep = 2; let bad: Int = "no";',
+    'struct S { a: Int } let y: Int = "no";',
+    'enum E { A, B } let y: Int = "no";',
+    'enum Other { Shared, Fresh } let y: Int = "no";',
+    'fn helper() -> Int { 2 } impl P { fn other(self) -> Int { 1 } fn get(self) -> Int { 2 } } let y: Int = "no";',
+    "undefined_name",
+    "fn broken() -> Int { undefined_name }",
+    "struct P { x: Int, y: Int }",
+    "let keep = 3; undefined_name",
+    "enum Q { Shared } undefined_name",
+]
+
+
+@pytest.mark.parametrize("failing", FAILING_INPUTS)
+def test_a_failed_input_restores_every_table_exactly(failing: str) -> None:
+    s, _ = session()
+    s.eval("struct P { x: Int }")
+    s.eval("impl P { fn get(self) -> Int { self.x } }")
+    s.eval("enum Q { Shared, Only }")
+    s.eval("fn helper() -> Int { 1 }")
+    s.eval("let keep = 1;")
+    before = fingerprint(s)
+    with pytest.raises(VexError):
+        s.eval(failing)
+    assert fingerprint(s) == before
+    assert s.eval("keep + helper() + P { x: 40 }.get()") == "42 : Int"
+    assert s.eval("Q.Only") == "Only : Q"
+
+
+def test_a_successful_input_after_a_failed_one_is_kept() -> None:
+    s, _ = session()
+    s.eval("let keep = 1;")
+    with pytest.raises(VexError):
+        s.eval("let keep = 2; undefined_name")
+    s.eval("let keep = 5;")
+    assert s.eval("keep") == "5 : Int"
+    with pytest.raises(VexError):
+        s.eval("let keep = 9; undefined_name")
+    assert s.eval("keep") == "5 : Int"

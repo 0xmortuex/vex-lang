@@ -76,7 +76,7 @@ A short example, `fn add(a: Int, b: Int) -> Int { a + b }`:
 ## Integer semantics (the contract)
 
 * `Int` is 64-bit two's complement range, `-2^63 … 2^63 - 1`.
-* `+ - *`, unary `-` and the library functions `abs`, `pow`, `sum` are **checked**: a result outside the
+* `+ - *`, unary `-` and the library functions `abs`, `pow`, `sum`, `gcd`, `Range.len` are **checked**: a result outside the
   range raises the runtime error ``integer overflow in `op` ``. There is no wraparound mode.
 * `/` truncates toward zero; `%` has the sign of the left operand; `x / 0` and `x % 0` raise
   `division by zero`; `MIN / -1` raises ``integer overflow in `/` ``.
@@ -91,6 +91,15 @@ innermost `execute` loop, and converted to a `VexRuntimeError` carrying a stack 
 each frame's saved program counter and the instruction span table. The CLI prints the message,
 the failing source line with a caret and "in <function> at file:line:col" for each frame
 (long traces are elided in the middle). Process exit codes: 2 for a runtime error.
+
+## Allocation limits
+
+A `Str` built by one operation is limited to 50,000,000 characters and a `List` built by one operation to
+10,000,000 elements. Every builtin that returns a `Str` or a `List`, along with `+`, interpolation, `extend`,
+list and map literals and the text of `print` / `eprint`, stops the program with a runtime error instead of
+exceeding them, and `io.read_file` returns `Err`. Within a program, a `List` or `Map` can pass the cap only by
+growing one `push` or `insert` at a time, and builtins that would build a new list from it refuse. Running out
+of memory while growing one is a runtime error like any other.
 
 ## Performance notes
 

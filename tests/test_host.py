@@ -22,6 +22,7 @@ from vex.host import (
     VexBindingError,
     VexBudgetError,
 )
+from vex.stdlib import METHODS, NAMESPACES
 
 
 def codes(host: Host, src: str) -> list[str]:
@@ -259,7 +260,13 @@ def test_panic_in_a_builtin_that_uses_the_vm_reports_every_frame_once() -> None:
     assert [f[0] for f in e.value.trace] == ["go"]
 
 
-def test_internal_python_errors_become_runtime_errors() -> None:
+def _raise_overflow(r: range) -> int:
+    raise OverflowError("Python int too large to convert to C ssize_t")
+
+
+def test_internal_python_errors_become_runtime_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Range.len now checks the 64-bit contract itself, so force the Python error to exercise this path.
+    monkeypatch.setattr(METHODS["Range"]["len"], "impl", _raise_overflow)
     h = Host()
     h.load("r.vx", "fn go() { (math.INT_MIN..math.INT_MAX).len() }")
     with pytest.raises(VexRuntimeError) as e:
@@ -353,7 +360,9 @@ def test_nan_crosses() -> None:
     assert math.isnan(h.call("go", [math.nan]))
 
 
-def test_out_of_range_int_result_is_an_error() -> None:
+def test_out_of_range_int_result_is_an_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    # gcd now checks the 64-bit contract itself, so force an out-of-range value through to the result check.
+    monkeypatch.setattr(NAMESPACES["math"]["gcd"], "impl", lambda a, b: 2**63)
     h = Host()
     h.load("r.vx", "fn go() { math.gcd(math.INT_MIN, 0) }")
     with pytest.raises(VexRuntimeError, match="64-bit"):

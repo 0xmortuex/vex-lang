@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 from vex.diagnostics import DiagSink, Source, Span
@@ -20,6 +21,23 @@ PUNCT = [
 ]  # fmt: skip
 
 StrPart = str | tuple[int, int]
+
+# Numeric literals are ASCII only. str.isdigit() also accepts characters such as "²" and "٣".
+DIGITS = "0123456789"
+BASE_DIGITS = {2: "01", 8: "01234567", 16: DIGITS + "abcdefABCDEF"}
+
+INT_MAX = 2**63 - 1
+INT_MIN = -(2**63)
+# Significant digits needed to write 2**63, the largest magnitude a literal can have (it is only valid
+# after unary minus). A literal with more digits is out of range and is never converted to a Python int.
+MAX_INT_DIGITS = {2: 64, 8: 22, 10: 19, 16: 16}
+INT_RANGE_LABEL = "does not fit in a 64-bit Int"
+INT_RANGE_HELP = f"Int is a signed 64-bit integer ({INT_MIN} to {INT_MAX})"
+
+
+def int_range_message(literal: str) -> str:
+    shown = literal if len(literal) <= 32 else f"{literal[:16]}...{literal[-8:]}"
+    return f"integer literal `{shown}` is out of range"
 
 ESCAPES = {"n": "\n", "t": "\t", "r": "\r", "0": "\0", "\\": "\\", '"': '"', "{": "{", "}": "}"}
 
@@ -54,7 +72,7 @@ class Lexer:
             if self.pos >= self.end:
                 break
             ch = self.text[self.pos]
-            if ch.isdigit():
+            if ch in DIGITS:
                 self._number()
             elif ch.isalpha() or ch == "_":
                 self._ident()
@@ -115,15 +133,15 @@ class Lexer:
             while self.pos < self.end and (t[self.pos].isalnum() or t[self.pos] == "_"):
                 self.pos += 1
             raw = t[digits_start : self.pos].replace("_", "")
-            try:
-                value = int(raw, base)
-            except ValueError:
+            if raw and all(c in BASE_DIGITS[base] for c in raw):
+                value = self._int_value(raw, base, start)
+            else:
                 self.error("bad-number", f"invalid base-{base} integer literal", start, self.pos,
                            "not a valid number")  # fmt: skip
                 value = 0
             self.tokens.append(Token("INT", t[start : self.pos], start, self.pos, value))
             return
-        while self.pos < self.end and (t[self.pos].isdigit() or t[self.pos] == "_"):
+        while self.pos < self.end and (t[self.pos] in DIGITS or t[self.pos] == "_"):
             self.pos += 1
         is_float = False
         # "1.5" is a float but "1..2" and "t.0.1" must not be.
@@ -131,20 +149,20 @@ class Lexer:
             not after_dot
             and self.pos + 1 < self.end
             and t[self.pos] == "."
-            and t[self.pos + 1].isdigit()
+            and t[self.pos + 1] in DIGITS
         ):
             is_float = True
             self.pos += 1
-            while self.pos < self.end and (t[self.pos].isdigit() or t[self.pos] == "_"):
+            while self.pos < self.end and (t[self.pos] in DIGITS or t[self.pos] == "_"):
                 self.pos += 1
         if not after_dot and self.pos < self.end and t[self.pos] in "eE":
             save = self.pos
             self.pos += 1
             if self.pos < self.end and t[self.pos] in "+-":
                 self.pos += 1
-            if self.pos < self.end and t[self.pos].isdigit():
+            if self.pos < self.end and t[self.pos] in DIGITS:
                 is_float = True
-                while self.pos < self.end and t[self.pos].isdigit():
+                while self.pos < self.end and t[self.pos] in DIGITS:
                     self.pos += 1
             else:
                 self.pos = save
@@ -157,9 +175,25 @@ class Lexer:
             self.error("bad-number", "invalid suffix on number literal", start, self.pos,
                        f"`{t[tail:self.pos]}` is not a valid suffix")  # fmt: skip
         if is_float:
-            self.tokens.append(Token("FLOAT", raw, start, self.pos, float(raw)))
+            number = float(raw)
+            if math.isinf(number):
+                self.error("float-literal-range", "float literal is out of range", start, self.pos,
+                           "too large for a 64-bit Float",
+                           "the largest Float is about 1.8e308")  # fmt: skip
+                number = 0.0
+            self.tokens.append(Token("FLOAT", raw, start, self.pos, number))
         else:
-            self.tokens.append(Token("INT", raw, start, self.pos, int(raw)))
+            value = self._int_value(raw, 10, start)
+            # After a dot this is a tuple index, which later stages read back from the token text.
+            self.tokens.append(Token("INT", str(value) if after_dot else raw, start, self.pos, value))
+
+    def _int_value(self, digits: str, base: int, start: int) -> int:
+        significant = digits.lstrip("0")
+        if len(significant) > MAX_INT_DIGITS[base]:
+            self.error("int-literal-range", int_range_message(self.text[start : self.pos]), start, self.pos,
+                       INT_RANGE_LABEL, INT_RANGE_HELP)  # fmt: skip
+            return 0
+        return int(significant or "0", base)
 
     def _punct(self) -> None:
         t = self.text
@@ -203,6 +237,10 @@ class Lexer:
                     buf = []
                 parts.append((self.pos + 1, close))
                 self.pos = close + 1
+            elif "\ud800" <= ch <= "\udfff":
+                self.error("unexpected-character", f"unexpected character {ch!r}", self.pos, self.pos + 1,
+                           "a lone surrogate is not a Unicode character")  # fmt: skip
+                self.pos += 1
             else:
                 buf.append(ch)
                 self.pos += 1
@@ -221,9 +259,10 @@ class Lexer:
             if self.pos + 1 < self.end and t[self.pos + 1] == "{":
                 close = t.find("}", self.pos)
                 digits = t[self.pos + 2 : close] if close != -1 else ""
-                try:
-                    buf.append(chr(int(digits, 16)))
-                except (ValueError, OverflowError):
+                code_point = _code_point(digits)
+                if code_point is not None:
+                    buf.append(chr(code_point))
+                else:
                     self.error("bad-escape", "invalid unicode escape", start, max(close, self.pos) + 1,
                                "expected `\\u{XXXX}` with a valid code point")  # fmt: skip
                 self.pos = (close if close != -1 else self.pos) + 1
@@ -257,6 +296,17 @@ class Lexer:
                     return i
             i += 1
         return -1
+
+
+def _code_point(digits: str) -> int | None:
+    """The Unicode scalar value written by ASCII hex ``digits``; None if they do not denote one."""
+    if not digits or any(c not in BASE_DIGITS[16] for c in digits):
+        return None
+    significant = digits.lstrip("0")
+    if len(significant) > 6:
+        return None
+    value = int(significant or "0", 16)
+    return None if value > 0x10FFFF or 0xD800 <= value <= 0xDFFF else value
 
 
 def tokenize(source: Source, sink: DiagSink) -> list[Token]:

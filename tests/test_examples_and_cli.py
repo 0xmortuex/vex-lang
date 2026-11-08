@@ -8,6 +8,9 @@ import sys
 
 import pytest
 
+from vex.api import compile_file, read_source
+from vex.diagnostics import VexError
+
 ROOT = pathlib.Path(__file__).parent.parent
 EXAMPLES = sorted((ROOT / "examples").glob("*.vx"))
 MODULES = pathlib.Path(__file__).parent / "modules"
@@ -217,3 +220,91 @@ def test_printing_and_comparing_deeply_nested_values(tmp_path: pathlib.Path) -> 
 def test_disassembly_names_builtins_without_underscores() -> None:
     res = vex("disasm", str(ROOT / "examples" / "hello.vx"))
     assert "print/1" in res.stdout and "_print" not in res.stdout
+
+
+def test_cli_reports_runaway_nesting_on_the_big_stack(tmp_path: pathlib.Path) -> None:
+    path = tmp_path / "deep.vx"
+    path.write_text("fn main() {\n" + "{" * 100_000, encoding="utf-8")
+    proc = vex("check", str(path))
+    assert proc.returncode == 1, proc.stderr[-500:]
+    assert "too-deep" in proc.stderr
+    assert "internal compiler error" not in proc.stderr
+
+
+@pytest.mark.parametrize(
+    ("data", "line", "col"),
+    [
+        (b"fn main() {\n  print(\xff);\n}\n", 2, 9),
+        (b"\xef\xbb\xbffn main() {\xc0\xaf}", 1, 12),  # after a BOM, an overlong encoding
+        (b"// \xed\xa0\x80\nfn main() {}", 1, 4),  # an encoded surrogate inside a comment
+        (b'fn main() { print("caf\xc3\xa9\xf4\x90\x80\x80"); }', 1, 24),  # above U+10FFFF, inside a string
+        (b"fn main() {}\r\nfn g() {}\r\n\xe2\x82", 3, 1),  # truncated at end of file, CRLF line ends
+    ],
+    ids=["bare-byte", "bom-overlong", "surrogate-in-comment", "too-large-in-string", "truncated-crlf"],
+)
+def test_invalid_utf8_is_a_positioned_diagnostic(
+    tmp_path: pathlib.Path, data: bytes, line: int, col: int
+) -> None:
+    path = tmp_path / "bad.vx"
+    path.write_bytes(data)
+    with pytest.raises(VexError) as info:
+        compile_file(str(path))
+    diags = info.value.diagnostics
+    assert [d.code for d in diags] == ["invalid-utf8"]
+    assert diags[0].span is not None and (diags[0].span.line, diags[0].span.col) == (line, col)
+    diags[0].render()
+
+
+@pytest.mark.parametrize("command", ["run", "check", "disasm"])
+def test_cli_reports_invalid_utf8(tmp_path: pathlib.Path, command: str) -> None:
+    path = tmp_path / "bad.vx"
+    path.write_bytes(b"fn main() {\n  print(\xff);\n}\n")
+    proc = vex(command, str(path))
+    assert proc.returncode == 1, proc.stderr[-500:]
+    assert "invalid-utf8" in proc.stderr
+    assert "internal compiler error" not in proc.stderr
+
+
+def test_invalid_utf8_in_an_import_names_that_file(tmp_path: pathlib.Path) -> None:
+    (tmp_path / "bad.vx").write_bytes(b"\xff")
+    main = tmp_path / "main.vx"
+    main.write_text("import bad;\nfn main() {}\n", encoding="utf-8")
+    with pytest.raises(VexError) as info:
+        compile_file(str(main))
+    span = info.value.diagnostics[0].span
+    assert info.value.diagnostics[0].code == "invalid-utf8"
+    assert span is not None and span.source.path.endswith("bad.vx")
+
+
+def test_valid_utf8_with_bom_and_crlf_still_reads(tmp_path: pathlib.Path) -> None:
+    path = tmp_path / "ok.vx"
+    path.write_bytes(b"\xef\xbb\xbffn main() {\r\n  print(\"caf\xc3\xa9\");\r\n}\r\n")
+    assert read_source(str(path)).text == 'fn main() {\n  print("café");\n}\n'
+
+
+def run_with_stdin_bytes(args: list[str], data: bytes) -> subprocess.CompletedProcess[bytes]:
+    return subprocess.run([sys.executable, "-m", "vex", *args], input=data, capture_output=True, cwd=ROOT, timeout=120)
+
+
+def test_repl_on_a_pipe_reports_invalid_utf8() -> None:
+    proc = run_with_stdin_bytes(["repl"], b"\xff\n")
+    assert proc.returncode == 0, proc.stderr[-500:]
+    assert b"invalid-utf8" in proc.stdout
+    assert b"internal compiler error" not in proc.stderr
+
+
+def test_program_reading_invalid_utf8_stdin_gets_a_runtime_error(tmp_path: pathlib.Path) -> None:
+    path = tmp_path / "read.vx"
+    path.write_text("fn main() { print(io.read_line()); }\n", encoding="utf-8")
+    proc = run_with_stdin_bytes(["run", str(path)], b"\xff\n")
+    assert proc.returncode == 2, proc.stderr[-500:]
+    assert b"not valid UTF-8" in proc.stderr
+    assert b"internal compiler error" not in proc.stderr
+
+
+def test_cli_compile_stage_overflow_reports_the_real_location(tmp_path: pathlib.Path) -> None:
+    path = tmp_path / "chain.vx"
+    path.write_text("fn main() {\n  print(" + "+".join(["1"] * 40_000) + ");\n}\n", encoding="utf-8")
+    proc = vex("check", str(path))
+    assert proc.returncode == 1, proc.stderr[-500:]
+    assert "too-deep" in proc.stderr and "chain.vx:2:9" in proc.stderr

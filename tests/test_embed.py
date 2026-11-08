@@ -12,6 +12,7 @@ import pytest
 from vex import embed
 from vex.embed import HOST_FN, VexApi, VexValue
 from vex.host import DEFAULT_BUDGET, MAX_HOST_DEPTH
+from vex.stdlib import METHODS
 
 OK, COMPILE, RUNTIME, BINDING, BUDGET = 0, 1, 2, 3, 4
 UNIT, INT, FLOAT, BOOL, STR = 0, 1, 2, 3, 4
@@ -573,7 +574,12 @@ def test_compiler_crash_is_status_1(api: Api, monkeypatch: pytest.MonkeyPatch) -
     assert "ZeroDivisionError" in api.error(vm)
 
 
-def test_internal_runtime_exception_is_status_2(api: Api) -> None:
+def test_internal_runtime_exception_is_status_2(api: Api, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Range.len now checks the 64-bit contract itself, so force the Python error to exercise this path.
+    def overflow(r: range) -> int:
+        raise OverflowError("Python int too large to convert to C ssize_t")
+
+    monkeypatch.setattr(METHODS["Range"]["len"], "impl", overflow)
     vm = api.open()
     api.load(vm, "fn f() { (math.INT_MIN..math.INT_MAX).len() }")
     assert api.call(vm, b"f", [])[0] == RUNTIME

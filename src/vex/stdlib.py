@@ -7,10 +7,12 @@ import os
 import re
 import sys
 from collections.abc import Callable
+from itertools import islice
 from typing import Any
 
+from vex import runtime
 from vex import syntax as ast
-from vex.diagnostics import DiagSink, Source
+from vex.diagnostics import DiagSink, Source, first_undecodable
 from vex.parser import Parser
 from vex.runtime import (
     INT_MAX,
@@ -129,19 +131,44 @@ def _snapshot(vm: Any, xs: list[Any]) -> list[Any]:
     return list(xs)
 
 
+def _bounded_snapshot(vm: Any, xs: list[Any]) -> list[Any]:
+    """The copy ``map`` and ``filter`` loop over; their result can be as long as it, so the list cap applies."""
+    _check_list(len(xs))
+    return _snapshot(vm, xs)
+
+
 def checked(r: int, what: str) -> int:
     if r > INT_MAX or r < INT_MIN:
         raise VexPanic(f"integer overflow in `{what}`")
     return r
 
 
+def _check_str(n: int) -> None:
+    if n > runtime.MAX_STR_LEN:
+        raise VexPanic("string too large")
+
+
+def _check_list(n: int) -> None:
+    if n > runtime.MAX_LIST_LEN:
+        raise VexPanic(f"list too large ({n} elements, the limit is {runtime.MAX_LIST_LEN})")
+
+
 # ------------------------------------------------------------------ global functions
+def _emit(stream: Any, text: str, name: str) -> None:
+    if stream is None:
+        raise VexPanic(f"{name} is not available")
+    try:
+        stream.write(text + "\n")
+    except (OSError, ValueError) as e:  # a dead pipe, a closed file, or a codec that cannot encode the text
+        raise VexPanic(f"cannot write to {name}: {e}") from None
+
+
 def _print(vm: Any, x: Any) -> None:
-    vm.out.write(display(x, charge=vm.charge) + "\n")
+    _emit(vm.out, display(x, charge=vm.charge), "standard output")
 
 
 def _eprint(vm: Any, x: Any) -> None:
-    sys.stderr.write(display(x, charge=vm.charge) + "\n")
+    _emit(sys.stderr, display(x, charge=vm.charge), "standard error")
 
 
 def _panic(msg: str) -> None:
@@ -221,16 +248,19 @@ method("Bool", "to_str", "(Bool) -> Str", display)
 
 # ------------------------------------------------------------------ Str
 _INT_RE = re.compile(r"[+-]?[0-9]+")
+# Each alternative decides on its next character: "[0-9]+\.?[0-9]*" backtracks quadratically on long digit runs.
 _FLOAT_RE = re.compile(r"[+-]?([0-9]+(\.[0-9]*)?|\.[0-9]+)([eE][+-]?[0-9]+)?")
 
 
 def _str_to_int(s: str) -> Any:
     s = s.strip()
-    if _INT_RE.fullmatch(s):
-        n = int(s)
-        if INT_MIN <= n <= INT_MAX:
-            return some(n)
-    return NONE
+    if not _INT_RE.fullmatch(s):
+        return NONE
+    magnitude = s.lstrip("+-").lstrip("0")
+    if len(magnitude) > 19:  # never ask int() for more digits than Python's bignum parsing limit allows
+        return NONE
+    n = -int(magnitude or "0") if s.startswith("-") else int(magnitude or "0")
+    return some(n) if INT_MIN <= n <= INT_MAX else NONE
 
 
 def _str_to_float(s: str) -> Any:
@@ -249,21 +279,54 @@ def _replace(vm: Any, s: str, a: str, b: str) -> str:
     if a == "":
         raise VexPanic("`replace` pattern must not be empty")
     vm.charge(len(s) + len(a))
-    vm.charge(s.count(a) * max(0, len(b) - len(a)))
+    hits = s.count(a)
+    _check_str(len(s) + hits * (len(b) - len(a)))
+    vm.charge(hits * max(0, len(b) - len(a)))
     return s.replace(a, b)
 
 
 def _repeat(vm: Any, s: str, n: int) -> str:
     if n < 0:
         raise VexPanic("negative repeat count")
-    if len(s) * n > 50_000_000:
-        raise VexPanic("string too large")
+    _check_str(len(s) * n)
     vm.charge(len(s) * n)
     return s * n
 
 
+def _upper(s: str) -> str:
+    result = s.upper()  # at most three characters per character, so this allocation is itself bounded
+    _check_str(len(result))
+    return result
+
+
+def _lower(s: str) -> str:
+    result = s.lower()
+    _check_str(len(result))
+    return result
+
+
+_LINE_BREAK = re.compile("\r\n|[\n\r\v\f\x1c\x1d\x1e\x85  ]")  # exactly what str.splitlines breaks on
+_LINE_BREAK_CHARS = "\n\r\v\f\x1c\x1d\x1e\x85  "
+
+
+def _lines(s: str) -> list[str]:
+    limit = runtime.MAX_LIST_LEN
+    if len(s) > limit:  # a shorter string cannot hold too many lines, so only this one is worth counting
+        breaks = sum(1 for _ in islice(_LINE_BREAK.finditer(s), limit + 1))
+        _check_list(breaks if s[-1] in _LINE_BREAK_CHARS else breaks + 1)
+    return s.splitlines()
+
+
+def _chars(s: str) -> list[str]:
+    _check_list(len(s))
+    return list(s)
+
+
 def _split(s: str, sep: str) -> list[str]:
-    return list(s) if sep == "" else s.split(sep)
+    if sep == "":
+        return _chars(s)
+    _check_list(s.count(sep) + 1)
+    return s.split(sep)
 
 
 def _char_at(s: str, i: int) -> Any:
@@ -283,16 +346,16 @@ def _code(s: str) -> int:
 
 method("Str", "len", "(Str) -> Int", len)
 method("Str", "is_empty", "(Str) -> Bool", lambda s: not s)
-method("Str", "upper", "(Str) -> Str", _by_input(str.upper), needs_vm=True)
-method("Str", "lower", "(Str) -> Str", _by_input(str.lower), needs_vm=True)
+method("Str", "upper", "(Str) -> Str", _by_input(_upper), needs_vm=True)
+method("Str", "lower", "(Str) -> Str", _by_input(_lower), needs_vm=True)
 method("Str", "trim", "(Str) -> Str", _by_input(str.strip), needs_vm=True)
 method("Str", "contains", "(Str, Str) -> Bool", _by_input(lambda s, t: t in s), needs_vm=True)
 method("Str", "starts_with", "(Str, Str) -> Bool", _by_input(str.startswith), needs_vm=True)
 method("Str", "ends_with", "(Str, Str) -> Bool", _by_input(str.endswith), needs_vm=True)
 method("Str", "replace", "(Str, Str, Str) -> Str", _replace, needs_vm=True)
 method("Str", "split", "(Str, Str) -> List[Str]", _by_input(_split), needs_vm=True)
-method("Str", "lines", "(Str) -> List[Str]", _by_input(str.splitlines), needs_vm=True)
-method("Str", "chars", "(Str) -> List[Str]", _by_input(list, factor=2), needs_vm=True)
+method("Str", "lines", "(Str) -> List[Str]", _by_input(_lines), needs_vm=True)
+method("Str", "chars", "(Str) -> List[Str]", _by_input(_chars, factor=2), needs_vm=True)
 method("Str", "repeat", "(Str, Int) -> Str", _repeat, needs_vm=True)
 method("Str", "to_int", "(Str) -> Option[Int]", _by_input(_str_to_int), needs_vm=True)
 method("Str", "to_float", "(Str) -> Option[Float]", _by_input(_str_to_float), needs_vm=True)
@@ -316,6 +379,7 @@ def _list_slice(vm: Any, xs: list[Any], a: int, b: int) -> list[Any]:
     if a < 0 or b > len(xs) or a > b:
         raise VexPanic(f"slice {a}..{b} out of range for list of length {len(xs)}")
     vm.charge(b - a)
+    _check_list(b - a)
     return xs[a:b]
 
 
@@ -372,31 +436,65 @@ def _sort_cost(vm: Any, xs: list[Any]) -> None:
 
 def _sort(vm: Any, xs: list[Any]) -> None:
     _sort_cost(vm, xs)
-    xs.sort()
+    if not xs or xs[0] is not None:  # a list of Unit is already sorted; Python cannot compare None
+        xs.sort()
 
 
 def _sorted(vm: Any, xs: list[Any]) -> list[Any]:
-    _sort_cost(vm, xs)
-    return sorted(xs)
+    result = _copy(xs)
+    _sort(vm, result)
+    return result
 
 
 def _sum(xs: list[int]) -> int:
     return checked(sum(xs), "sum")
 
 
+def _sum_float(xs: list[float]) -> float:
+    try:
+        return math.fsum(xs)
+    except (OverflowError, ValueError):  # fsum refuses intermediate overflow; addition gives inf or NaN
+        return sum(xs, 0.0)
+
+
 def _join(vm: Any, xs: list[str], sep: str) -> str:
     vm.charge(len(xs))
-    vm.charge(sum(map(len, xs)) + len(sep) * len(xs))
+    size = sum(map(len, xs))
+    vm.charge(size + len(sep) * len(xs))
+    _check_str(size + len(sep) * max(len(xs) - 1, 0))
     return sep.join(xs)
+
+
+def _concat(xs: list[Any], ys: list[Any]) -> list[Any]:
+    _check_list(len(xs) + len(ys))
+    return xs + ys
 
 
 def _extend(vm: Any, xs: list[Any], ys: list[Any]) -> None:
     vm.charge(len(ys))
+    _check_list(len(xs) + len(ys))
     xs.extend(ys)
 
 
+def _copy(xs: list[Any]) -> list[Any]:
+    _check_list(len(xs))  # a list grown by `push` can be longer than one operation may build
+    return list(xs)
+
+
+def _enumerate(xs: list[Any]) -> list[tuple[int, Any]]:
+    _check_list(len(xs))
+    return list(enumerate(xs))
+
+
+def _zip(xs: list[Any], ys: list[Any]) -> list[tuple[Any, Any]]:
+    _check_list(min(len(xs), len(ys)))
+    return list(zip(xs, ys))
+
+
 def _range_to_list(vm: Any, r: range) -> list[int]:
-    vm.charge(max(0, r.stop - r.start))
+    size = max(0, r.stop - r.start)
+    vm.charge(size)
+    _check_list(size)
     return list(r)
 
 
@@ -430,12 +528,12 @@ method("List", "last", "[T](List[T]) -> Option[T]", _last)
 method("List", "contains", "[T: Eq](List[T], T) -> Bool", _contains, needs_vm=True)
 method("List", "index_of", "[T: Eq](List[T], T) -> Option[Int]", _index_of_list, needs_vm=True)
 method("List", "slice", "[T](List[T], Int, Int) -> List[T]", _list_slice, needs_vm=True)
-method("List", "concat", "[T](List[T], List[T]) -> List[T]", _by_input(lambda xs, ys: xs + ys), needs_vm=True)
-method("List", "copy", "[T](List[T]) -> List[T]", _by_input(list), needs_vm=True)
+method("List", "concat", "[T](List[T], List[T]) -> List[T]", _by_input(_concat), needs_vm=True)
+method("List", "copy", "[T](List[T]) -> List[T]", _by_input(_copy), needs_vm=True)
 method("List", "map", "[T, U](List[T], fn(T) -> U) -> List[U]",
-       lambda vm, xs, f: [vm.call(f, [x]) for x in _snapshot(vm, xs)], needs_vm=True)  # fmt: skip
+       lambda vm, xs, f: [vm.call(f, [x]) for x in _bounded_snapshot(vm, xs)], needs_vm=True)  # fmt: skip
 method("List", "filter", "[T](List[T], fn(T) -> Bool) -> List[T]",
-       lambda vm, xs, f: [x for x in _snapshot(vm, xs) if vm.call(f, [x])], needs_vm=True)  # fmt: skip
+       lambda vm, xs, f: [x for x in _bounded_snapshot(vm, xs) if vm.call(f, [x])], needs_vm=True)  # fmt: skip
 method("List", "fold", "[T, U](List[T], U, fn(U, T) -> U) -> U", _fold, needs_vm=True)
 method("List", "any", "[T](List[T], fn(T) -> Bool) -> Bool",
        lambda vm, xs, f: any(vm.call(f, [x]) for x in _snapshot(vm, xs)), needs_vm=True)  # fmt: skip
@@ -443,10 +541,10 @@ method("List", "all", "[T](List[T], fn(T) -> Bool) -> Bool",
        lambda vm, xs, f: all(vm.call(f, [x]) for x in _snapshot(vm, xs)), needs_vm=True)  # fmt: skip
 method("List", "find", "[T](List[T], fn(T) -> Bool) -> Option[T]", _find, needs_vm=True)
 method("List", "for_each", "[T](List[T], fn(T) -> Unit)", _for_each, needs_vm=True)
-method("List", "enumerate", "[T](List[T]) -> List[(Int, T)]", _by_input(lambda xs: list(enumerate(xs)), factor=3), needs_vm=True)
-method("List", "zip", "[T, U](List[T], List[U]) -> List[(T, U)]", _by_input(lambda xs, ys: list(zip(xs, ys)), factor=3), needs_vm=True)
+method("List", "enumerate", "[T](List[T]) -> List[(Int, T)]", _by_input(_enumerate, factor=3), needs_vm=True)
+method("List", "zip", "[T, U](List[T], List[U]) -> List[(T, U)]", _by_input(_zip, factor=3), needs_vm=True)
 method("List", "sum", "(List[Int]) -> Int", _by_input(_sum), needs_vm=True)
-method("List", "sum_float", "(List[Float]) -> Float", _by_input(lambda xs: math.fsum(xs)), needs_vm=True)
+method("List", "sum_float", "(List[Float]) -> Float", _by_input(_sum_float), needs_vm=True)
 method("List", "join", "(List[Str], Str) -> Str", _join, needs_vm=True)
 
 
@@ -459,6 +557,21 @@ def _map_remove(m: dict[Any, Any], k: Any) -> Any:
     return some(m.pop(k)) if k in m else NONE
 
 
+def _map_keys(m: dict[Any, Any]) -> list[Any]:
+    _check_list(len(m))
+    return list(m.keys())
+
+
+def _map_values(m: dict[Any, Any]) -> list[Any]:
+    _check_list(len(m))
+    return list(m.values())
+
+
+def _map_entries(m: dict[Any, Any]) -> list[tuple[Any, Any]]:
+    _check_list(len(m))
+    return list(m.items())
+
+
 method("Map", "len", "[K, V](Map[K, V]) -> Int", len)
 method("Map", "is_empty", "[K, V](Map[K, V]) -> Bool", lambda m: not m)
 method("Map", "get", "[K, V](Map[K, V], K) -> Option[V]", _by_key(_map_get), needs_vm=True)
@@ -466,9 +579,9 @@ method("Map", "insert", "[K, V](Map[K, V], K, V)", _by_key(lambda m, k, v: m.__s
 method("Map", "remove", "[K, V](Map[K, V], K) -> Option[V]", _by_key(_map_remove), mutates=True, needs_vm=True)
 method("Map", "clear", "[K, V](Map[K, V])", lambda m: m.clear(), mutates=True)
 method("Map", "contains_key", "[K, V](Map[K, V], K) -> Bool", _by_key(lambda m, k: k in m), needs_vm=True)
-method("Map", "keys", "[K, V](Map[K, V]) -> List[K]", _by_input(lambda m: list(m.keys())), needs_vm=True)
-method("Map", "values", "[K, V](Map[K, V]) -> List[V]", _by_input(lambda m: list(m.values())), needs_vm=True)
-method("Map", "entries", "[K, V](Map[K, V]) -> List[(K, V)]", _by_input(lambda m: list(m.items()), factor=3), needs_vm=True)
+method("Map", "keys", "[K, V](Map[K, V]) -> List[K]", _by_input(_map_keys), needs_vm=True)
+method("Map", "values", "[K, V](Map[K, V]) -> List[V]", _by_input(_map_values), needs_vm=True)
+method("Map", "entries", "[K, V](Map[K, V]) -> List[(K, V)]", _by_input(_map_entries, factor=3), needs_vm=True)
 
 
 # ------------------------------------------------------------------ Option / Result
@@ -528,8 +641,12 @@ method("Result", "and_then", "[T, E, U](Result[T, E], fn(T) -> Result[U, E]) -> 
        lambda vm, r, f: r if r.tag == 1 else vm.call(f, [r.f[0]]), needs_vm=True)  # fmt: skip
 
 # ------------------------------------------------------------------ Range
+def _range_len(r: range) -> int:
+    return checked(max(r.stop - r.start, 0), "len")  # len(r) raises OverflowError past sys.maxsize
+
+
 method("Range", "to_list", "(Range) -> List[Int]", _range_to_list, needs_vm=True)
-method("Range", "len", "(Range) -> Int", len)
+method("Range", "len", "(Range) -> Int", _range_len)
 method("Range", "contains", "(Range, Int) -> Bool", lambda r, x: x in r)
 
 
@@ -556,7 +673,7 @@ def _mpow(a: float, b: float) -> float:
 
 
 def _gcd(a: int, b: int) -> int:
-    return math.gcd(a, b)
+    return checked(math.gcd(a, b), "gcd")
 
 
 def _ln(x: float) -> float:
@@ -584,19 +701,27 @@ ns("math", "hypot", "(Float, Float) -> Float", math.hypot)
 _IO_CHUNK = 65_536
 
 
+def _file_error(path: str, e: Exception) -> Any:
+    return err(f"{path}: {e.strerror if isinstance(e, OSError) and e.strerror else e}")
+
+
 def _read_file(vm: Any, path: str) -> Any:
     vm.charge(len(path))
     try:
         with open(path, encoding="utf-8") as fh:
             parts: list[str] = []
+            size = 0
             while True:
                 part = fh.read(_IO_CHUNK)
                 vm.charge(len(part))
+                size += len(part)
+                if size > runtime.MAX_STR_LEN:
+                    return err(f"{path}: file too large")
                 parts.append(part)
                 if len(part) < _IO_CHUNK:
                     return ok("".join(parts))
-    except (OSError, UnicodeDecodeError) as e:
-        return err(f"{path}: {e.strerror if isinstance(e, OSError) and e.strerror else e}")
+    except (OSError, ValueError) as e:  # ValueError: undecodable contents, or a path holding a NUL
+        return _file_error(path, e)
 
 
 def _write_file(vm: Any, path: str, text: str) -> Any:
@@ -605,25 +730,55 @@ def _write_file(vm: Any, path: str, text: str) -> Any:
         with open(path, "w", encoding="utf-8", newline="") as fh:
             fh.write(text)
         return ok(None)
-    except OSError as e:
-        return err(f"{path}: {e.strerror or e}")
+    except (OSError, ValueError) as e:  # ValueError: a path holding a NUL
+        return _file_error(path, e)
 
 
 def _read_line(vm: Any) -> Any:
+    if sys.stdin is None:  # started with stdin closed: there is nothing to read
+        return NONE
     parts: list[str] = []
-    while True:
-        part = sys.stdin.readline(_IO_CHUNK)
-        vm.charge(len(part))
-        parts.append(part)
-        if len(part) < _IO_CHUNK or part.endswith("\n"):
-            break
+    size = 0
+    try:
+        while True:
+            part = sys.stdin.readline(_IO_CHUNK)
+            vm.charge(len(part))
+            size += len(part)
+            parts.append(part)
+            if len(part) < _IO_CHUNK or part.endswith("\n") or size > runtime.MAX_STR_LEN + 2:
+                break
+    except UnicodeDecodeError:
+        raise VexPanic("standard input is not valid UTF-8") from None
+    except (OSError, ValueError) as e:
+        raise VexPanic(f"cannot read standard input: {e}") from None
     line = "".join(parts)
+    if len(line.rstrip("\r\n")) > runtime.MAX_STR_LEN:
+        raise VexPanic("input line too long")
+    if first_undecodable(line) is not None:
+        raise VexPanic("standard input is not valid UTF-8")
     return NONE if line == "" else some(line.rstrip("\r\n"))
+
+
+def _require_unicode(text: str, what: str) -> str:
+    """A Vex string holds Unicode scalar values; the OS hands over undecodable bytes as lone surrogates."""
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        raise VexPanic(f"{what} is not valid Unicode") from None
+    return text
 
 
 def _env_get(name: str) -> Any:
     v = os.environ.get(name)
-    return NONE if v is None else some(v)
+    if v is None:
+        return NONE
+    _check_str(len(v))
+    return some(_require_unicode(v, f"environment variable {name}"))
+
+
+def _env_args(vm: Any) -> list[str]:
+    _check_list(len(vm.args))
+    return [_require_unicode(a, f"program argument {i}") for i, a in enumerate(vm.args)]
 
 
 ns("io", "read_file", "(Str) -> Result[Str, Str]", _read_file, needs_vm=True)
@@ -631,7 +786,7 @@ ns("io", "write_file", "(Str, Str) -> Result[Unit, Str]", _write_file, needs_vm=
 ns("io", "read_line", "() -> Option[Str]", _read_line, needs_vm=True)
 ns("env", "get", "(Str) -> Option[Str]", _by_input(_env_get), needs_vm=True)
 # env.args needs the VM (program arguments), registered with needs_vm below.
-_reg(NAMESPACES["env"], "env.args", "args", "() -> List[Str]", lambda vm: list(vm.args), needs_vm=True)
+_reg(NAMESPACES["env"], "env.args", "args", "() -> List[Str]", _env_args, needs_vm=True)
 
 # Which Vex type constructor names own which method tables.
 METHOD_HEADS = {"Int", "Float", "Bool", "Str", "List", "Map", "Option", "Result", "Range"}

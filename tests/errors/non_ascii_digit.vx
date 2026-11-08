@@ -1,0 +1,4 @@
+// expect: unexpected-character 3:15
+fn main() {
+    print(2 + ²);
+}

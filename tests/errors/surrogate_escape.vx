@@ -1,0 +1,4 @@
+// expect: bad-escape 3:12
+fn main() {
+    print("\u{D800}");
+}

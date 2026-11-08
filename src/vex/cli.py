@@ -20,13 +20,13 @@ EXIT_INTERNAL = 70
 
 
 def _configure_streams() -> None:
-    for stream in (sys.stdout, sys.stderr):
+    for stream, errors in ((sys.stdout, "strict"), (sys.stderr, "backslashreplace")):
         reconf = getattr(stream, "reconfigure", None)
         if reconf is not None:
-            reconf(encoding="utf-8", newline="\n")
+            reconf(encoding="utf-8", errors=errors, newline="\n")
     reconf_in = getattr(sys.stdin, "reconfigure", None)
     if reconf_in is not None:
-        reconf_in(encoding="utf-8")
+        reconf_in(encoding="utf-8", errors="surrogateescape")  # readers report invalid UTF-8 themselves
 
 
 def _run_big_stack(call: Callable[[], int]) -> int:
@@ -58,6 +58,29 @@ def _run_big_stack(call: Callable[[], int]) -> int:
     return result[0]
 
 
+def _flush_before_reporting() -> None:
+    """Keep program output ahead of its error message. If stdout is dead, the error is still the thing to report."""
+    try:
+        if sys.stdout is not None:
+            sys.stdout.flush()
+    except (OSError, ValueError):
+        pass
+
+
+def _output_lost(e: OSError) -> int:
+    """stdout (or stderr) failed. Silence stdout, or Python's flush at exit would fail again and say so."""
+    try:
+        if sys.stdout is not None:
+            os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+    except (OSError, ValueError):  # no file descriptor to redirect: there is no flush at exit to fail either
+        pass
+    try:
+        print(f"error: cannot write output: {e}", file=sys.stderr)
+    except (OSError, ValueError):  # stderr is the stream that failed: nowhere is left to report it
+        pass
+    return EXIT_RUNTIME
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     try:
         prog = compile_file(args.file)
@@ -76,7 +99,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     try:
         result = vm.run_function(prog.main)
     except VexRuntimeError as e:
-        sys.stdout.flush()
+        _flush_before_reporting()
         print(e.render(), file=sys.stderr)
         return EXIT_RUNTIME
     except VexExit as e:
@@ -112,6 +135,9 @@ def cmd_disasm(args: argparse.Namespace) -> int:
     except VexError as e:
         print(render_all(e.diagnostics), file=sys.stderr)
         return EXIT_COMPILE
+    except OSError as e:
+        print(f"error: cannot read {args.file}: {e}", file=sys.stderr)
+        return EXIT_COMPILE
     print(prog.disassemble())
     return 0
 
@@ -119,6 +145,9 @@ def cmd_disasm(args: argparse.Namespace) -> int:
 def cmd_repl(args: argparse.Namespace) -> int:
     from vex.repl import run_repl
 
+    if sys.stdin is None or sys.stdout is None:
+        print("error: the REPL needs standard input and output", file=sys.stderr)
+        return EXIT_RUNTIME
     return run_repl(sys.stdin, sys.stdout)
 
 
@@ -146,9 +175,14 @@ def main(argv: list[str] | None = None) -> int:
     _configure_streams()
     args = build_parser().parse_args(argv)
     try:
-        return _run_big_stack(lambda: int(args.fn(args)))
+        code = _run_big_stack(lambda: int(args.fn(args)))
+        if sys.stdout is not None:
+            sys.stdout.flush()
+        return code
     except KeyboardInterrupt:
         return 130
+    except OSError as e:  # commands report unreadable sources and `io.*` returns `Err`, so this is stdout or stderr
+        return _output_lost(e)
     except Exception as e:  # an internal bug: say so plainly instead of a bare traceback
         if os.environ.get("VEX_DEBUG"):
             raise

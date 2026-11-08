@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import pathlib
+
 import pytest
 
 from vex import syntax as ast
-from vex.diagnostics import DiagSink, Source
+from vex.api import compile_file, compile_text
+from vex.diagnostics import DiagSink, Source, VexError
 from vex.parser import parse_source
 
 
@@ -339,3 +342,96 @@ def test_repl_mode_accepts_statements_and_tail() -> None:
     mod = parse_source(Source("<r>", "let x = 1; x + 1"), sink, repl=True)
     assert not sink.items
     assert len(mod.stmts) == 1 and mod.tail is not None
+
+
+# ---------------------------------------------------------------- integer range
+def first_diag(src: str) -> tuple[str, int, int]:
+    _, sink = parse(src)
+    assert sink.items, "expected a diagnostic"
+    d = sink.items[0]
+    assert d.span is not None
+    return d.code, d.span.line, d.span.col
+
+
+@pytest.mark.parametrize("digits", ["9" * 20, "9" * 4301, "1" + "0" * 100_000])
+@pytest.mark.parametrize(
+    ("template", "col"),
+    [
+        ("fn main() {\n  let x = %s;\n}", 11),
+        ("fn main() {\n  let x = -%s;\n}", 12),
+        ("fn main() {\n  match 1 { %s => 1, _ => 2 };\n}", 13),
+        ("fn main() {\n  match 1 { -%s => 1, _ => 2 };\n}", 14),
+        ("fn main() {\n  let x = (1, 2).%s;\n}", 18),
+    ],
+)
+def test_oversized_integer_positions(digits: str, template: str, col: int) -> None:
+    assert first_diag(template % digits) == ("int-literal-range", 2, col)
+
+
+def test_int_min_literal_still_parses() -> None:
+    e = expr("-9223372036854775808")
+    assert isinstance(e, ast.IntLit) and e.value == -(2**63)
+
+
+def test_positive_int_min_magnitude_is_out_of_range() -> None:
+    assert first_diag("fn main() { 9223372036854775808 }") == ("int-literal-range", 1, 13)
+
+
+def test_nineteen_digit_overflow_with_leading_zeros_stays_short() -> None:
+    _, sink = parse("fn main() { " + "0" * 100_000 + "9999999999999999999 }")
+    assert [d.code for d in sink.items] == ["int-literal-range"]
+    assert len(sink.items[0].message) < 200
+
+
+# ---------------------------------------------------------------- recursion limits
+DEEP = 20_000
+
+
+@pytest.mark.parametrize(
+    "src",
+    [
+        "fn main() {\n" + "{" * DEEP,
+        "fn main() {\n" + "if true { " * DEEP,
+        "fn main() {\n" + "while true { " * DEEP,
+        "fn main() {\n" + "for x in y { " * DEEP,
+        "fn main() {\nlet x = " + "if " * DEEP,
+        "fn main() {\nlet x = " + "match " * DEEP,
+        "fn main() {\nif true {} " + "else if true {} " * DEEP,
+        "fn main() {\nlet x = " + "{ " * DEEP,
+        "fn main() {\n" + "match x { _ => " * DEEP,
+    ],
+    ids=["brace", "if", "while", "for", "if-cond", "match-cond", "else-if", "expr-block", "match-arm"],
+)
+def test_runaway_nesting_reports_where_it_happened(src: str) -> None:
+    _, sink = parse(src)
+    deep = [d for d in sink.items if d.code == "too-deep"]
+    assert deep, [d.code for d in sink.items]
+    assert deep[0].span is not None
+    assert deep[0].span.line >= 2, "the position must be in the nested code, not the start of the file"
+    deep[0].render()
+
+
+# ---------------------------------------------------------------- compile-stage recursion limits
+@pytest.mark.parametrize(
+    "tail",
+    ["+".join(["1"] * 40_000), "x" + ".a()" * 40_000],
+    ids=["binary-chain", "method-chain"],
+)
+def test_compile_stage_overflow_reports_the_real_location(tail: str) -> None:
+    src = "fn main() {\n\n  let x = " + tail + ";\n}\n"
+    with pytest.raises(VexError) as info:
+        compile_text(src, "<t>")
+    d = info.value.diagnostics[0]
+    assert d.code == "too-deep"
+    assert d.span is not None and (d.span.line, d.span.col) == (3, 11)
+
+
+def test_compile_stage_overflow_in_an_import_names_that_file(tmp_path: pathlib.Path) -> None:
+    (tmp_path / "deep.vx").write_text("fn f() {\n  let x = " + "+".join(["1"] * 40_000) + ";\n}\n", encoding="utf-8")
+    main = tmp_path / "main.vx"
+    main.write_text("import deep;\nfn main() {}\n", encoding="utf-8")
+    with pytest.raises(VexError) as info:
+        compile_file(str(main))
+    d = info.value.diagnostics[0]
+    assert d.code == "too-deep" and d.span is not None
+    assert d.span.source.path.endswith("deep.vx") and d.span.line == 2
