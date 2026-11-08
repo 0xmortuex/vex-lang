@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import TextIO
 
 from vex.checker import Checker
@@ -15,7 +16,6 @@ from vex.diagnostics import (
     render_all,
     too_deep_error,
 )
-from vex.lexer import Lexer
 from vex.parser import parse_source
 from vex.resolver import Resolver, make_env
 from vex.runtime import VexExit, display
@@ -32,19 +32,139 @@ Enter expressions, `let` statements, or definitions (fn / struct / enum / impl).
 Unfinished input (open brackets or strings) continues on the next line."""
 
 
+_CODE, _LINE_COMMENT, _BLOCK_COMMENT, _STRING, _UNICODE_ESCAPE, _INTERPOLATION, _NESTED_STRING = range(7)
+_NEXT_STOP = {
+    _CODE: re.compile(r'[/"()\[\]{}]'),
+    _LINE_COMMENT: re.compile(r"\n"),
+    _BLOCK_COMMENT: re.compile(r"[/*]"),
+    _STRING: re.compile(r'["\\{]'),
+    _UNICODE_ESCAPE: re.compile(r"}"),
+    _INTERPOLATION: re.compile(r'["{}]'),
+    _NESTED_STRING: re.compile(r'["\\]'),
+}
+
+
+class Continuation:
+    """Decides whether the input so far ends inside a bracket, string or comment, one chunk at a time.
+
+    It keeps the state of the scan, so each chunk costs only its own length, however much input is
+    already pending. It follows the lexer's rules for everything that can open or close one of those
+    regions (`Lexer._skip_trivia`, `_string`, `_escape`, `_interp_end`); no other token can contain
+    those characters, so the rest of the input can be skipped.
+    """
+
+    def __init__(self) -> None:
+        self.state = _CODE
+        self.depth = 0  # open brackets in code
+        self.comment_depth = 0
+        self.interpolation_depth = 0
+        self.held = ""  # the end of the last chunk, when deciding what it means needs the next character
+
+    @property
+    def incomplete(self) -> bool:
+        return self.state not in (_CODE, _LINE_COMMENT) or self.depth > 0
+
+    def feed(self, chunk: str) -> None:
+        text = self.held + chunk if self.held else chunk
+        self.held = ""
+        i, end = 0, len(text)
+        while i < end:
+            found = _NEXT_STOP[self.state].search(text, i)
+            if found is None:
+                return
+            i = found.start()
+            step = self._step(text, i, text[i])
+            if step == 0:  # needs a character that has not arrived yet
+                self.held = text[i:]
+                return
+            i += step
+
+    def _step(self, text: str, i: int, ch: str) -> int:
+        """Handle the significant character ``ch`` at ``i``; return how many to consume (0: wait for more)."""
+        if self.state == _CODE:
+            return self._code(text, i, ch)
+        if self.state == _LINE_COMMENT:
+            self.state = _CODE
+            return 1
+        if self.state == _BLOCK_COMMENT:
+            return self._block_comment(text, i, ch)
+        if self.state == _STRING:
+            return self._string(text, i, ch)
+        if self.state == _UNICODE_ESCAPE:
+            self.state = _STRING
+            return 1
+        if self.state == _INTERPOLATION:
+            if ch == '"':
+                self.state = _NESTED_STRING
+            elif ch == "{":
+                self.interpolation_depth += 1
+            else:
+                self.interpolation_depth -= 1
+                if self.interpolation_depth == 0:
+                    self.state = _STRING
+            return 1
+        if ch == '"':  # _NESTED_STRING
+            self.state = _INTERPOLATION
+            return 1
+        return 2 if i + 1 < len(text) else 0
+
+    def _code(self, text: str, i: int, ch: str) -> int:
+        if ch == '"':
+            self.state = _STRING
+        elif ch in "([{":
+            self.depth += 1
+        elif ch in ")]}":
+            self.depth -= 1
+        else:  # "/"
+            if i + 1 >= len(text):
+                return 0
+            if text[i + 1] == "/":
+                self.state = _LINE_COMMENT
+                return 2
+            if text[i + 1] == "*":
+                self.state = _BLOCK_COMMENT
+                self.comment_depth = 1
+                return 2
+        return 1
+
+    def _block_comment(self, text: str, i: int, ch: str) -> int:
+        if i + 1 >= len(text):
+            return 0
+        if ch == "/" and text[i + 1] == "*":
+            self.comment_depth += 1
+            return 2
+        if ch == "*" and text[i + 1] == "/":
+            self.comment_depth -= 1
+            if self.comment_depth == 0:
+                self.state = _CODE
+            return 2
+        return 1
+
+    def _string(self, text: str, i: int, ch: str) -> int:
+        if ch == '"':
+            self.state = _CODE
+            return 1
+        if ch == "{":
+            self.state = _INTERPOLATION
+            self.interpolation_depth = 1
+            return 1
+        if i + 1 >= len(text):  # the backslash is the last character so far
+            return 0
+        if text[i + 1] != "u":
+            return 2
+        if i + 2 >= len(text):
+            return 0
+        if text[i + 2] == "{":
+            self.state = _UNICODE_ESCAPE
+            return 3
+        return 2
+
+
 def is_incomplete(text: str) -> bool:
     """True when ``text`` ends inside a bracket, string or comment (more lines are needed)."""
-    sink = DiagSink()
-    toks = Lexer(Source("<repl>", text), sink).lex()
-    if any(d.code.startswith("unterminated") for d in sink.items):
-        return True
-    depth = 0
-    for t in toks:
-        if t.kind in ("(", "[", "{", "#{"):
-            depth += 1
-        elif t.kind in (")", "]", "}"):
-            depth -= 1
-    return depth > 0
+    continuation = Continuation()
+    continuation.feed(text)
+    return continuation.incomplete
 
 
 def _source_of_input(path: str, text: str) -> Source:
@@ -138,7 +258,8 @@ def run_repl(stdin: TextIO, stdout: TextIO) -> int:
     interactive = hasattr(stdin, "isatty") and stdin.isatty()
     if interactive:
         stdout.write("Vex REPL. :help for help, :quit to leave.\n")
-    pending = ""
+    pending: list[str] = []
+    continuation = Continuation()
     while session.exit_code is None:
         if interactive:
             stdout.write("...> " if pending else "vex> ")
@@ -150,7 +271,7 @@ def run_repl(stdin: TextIO, stdout: TextIO) -> int:
             break
         line = line.rstrip("\r\n")
         if first_undecodable(line) is not None:
-            pending = ""
+            pending, continuation = [], Continuation()
             session.handle(line)
             continue
         if not pending and line.strip().startswith(":"):
@@ -167,12 +288,13 @@ def run_repl(stdin: TextIO, stdout: TextIO) -> int:
             else:
                 stdout.write(f"unknown command {cmd}; try :help\n")
             continue
-        pending = pending + "\n" + line if pending else line
-        if not pending.strip():
-            pending = ""
+        if not pending and not line.strip():
             continue
-        if is_incomplete(pending):
+        continuation.feed("\n" + line if pending else line)
+        pending.append(line)
+        if continuation.incomplete:
             continue
-        text, pending = pending, ""
+        text = "\n".join(pending)
+        pending, continuation = [], Continuation()
         session.handle(text)
     return session.exit_code or 0

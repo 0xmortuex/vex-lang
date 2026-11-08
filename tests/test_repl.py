@@ -3,11 +3,17 @@
 from __future__ import annotations
 
 import io
+import random
+import sys
+import time
+from types import FrameType
+from typing import Any
 
 import pytest
 
-from vex.diagnostics import VexError, VexRuntimeError
-from vex.repl import Session, is_incomplete, run_repl
+from vex.diagnostics import DiagSink, Source, VexError, VexRuntimeError
+from vex.lexer import Lexer
+from vex.repl import Continuation, Session, is_incomplete, run_repl
 
 
 def session() -> tuple[Session, io.StringIO]:
@@ -278,3 +284,101 @@ def test_too_deep_input_is_a_diagnostic_and_keeps_the_session() -> None:
     assert "too-deep" in out.getvalue() and "<repl:2>:2:1" in out.getvalue()
     session.handle("keep + 1")
     assert "42 : Int" in out.getvalue()
+
+
+# ---------------------------------------------------------------- deciding "needs another line"
+class UncappedSink(DiagSink):
+    MAX_ERRORS = 10**9
+
+
+def lexer_says_incomplete(text: str) -> bool:
+    """The definition: what the real lexer reports for the whole text at once."""
+    sink = UncappedSink()
+    toks = Lexer(Source("<repl>", text), sink).lex()
+    if any(d.code.startswith("unterminated") for d in sink.items):
+        return True
+    opens = sum(t.kind in ("(", "[", "{", "#{") for t in toks)
+    closes = sum(t.kind in (")", "]", "}") for t in toks)
+    return opens > closes
+
+
+BS = chr(92)
+QUOTE = chr(34)
+FRAGMENTS = [
+    "(", ")", "[", "]", "{", "}", "#{", QUOTE, BS + QUOTE, BS, BS + "u", BS + "u{", BS + "n", "/", "*", "/*", "*/", "//",
+    "x", "1", "1e", "0x", "a b", chr(0xE9), chr(0xB2), "@", "#", " ", chr(9), "}" + QUOTE, "{" + QUOTE, QUOTE + "{",
+    "/*/", "*/*", BS + BS, "..", "/=", chr(0xFEFF),
+]  # fmt: skip
+
+
+@pytest.mark.parametrize("seed", range(400))
+def test_line_by_line_decision_agrees_with_the_lexer(seed: int) -> None:
+    rng = random.Random(f"continuation/{seed}")
+    lines = ["".join(rng.choice(FRAGMENTS) for _ in range(rng.randint(0, 9))) for _ in range(rng.randint(1, 6))]
+    continuation = Continuation()
+    for i, line in enumerate(lines):
+        continuation.feed("\n" + line if i else line)
+        assert continuation.incomplete is lexer_says_incomplete("\n".join(lines[: i + 1])), lines[: i + 1]
+
+
+def test_unterminated_string_after_many_other_errors_still_continues() -> None:
+    assert is_incomplete("@ " * 60 + '"abc') is True
+
+
+UNFINISHED_SHAPES = {
+    "paren": "(",
+    "brackets": "[",
+    "map": "#{",
+    "string": '"abc',
+    "comment": "/* abc",
+    "line-comment-in-parens": "( // abc",
+    "blank-in-parens": "",
+    "interpolation": '"{',
+    "string-in-interpolation": '"{"abc',
+    "unicode-escape": QUOTE + BS + "u{",
+    "trailing-escape": QUOTE + BS,
+}
+
+
+def calls_made(script: str) -> int:
+    """Python-level function calls made while the REPL reads ``script``: deterministic, unlike a stopwatch."""
+    count = 0
+
+    def profiler(frame: FrameType, event: str, arg: Any) -> None:
+        nonlocal count
+        count += event in ("call", "c_call")
+
+    sys.setprofile(profiler)
+    try:
+        run_repl(io.StringIO(script), io.StringIO())
+    finally:
+        sys.setprofile(None)
+    return count
+
+
+def unfinished_script(shape: str, lines: int) -> str:
+    # Opening the input first keeps the blank-line shape from being skipped as "nothing typed yet".
+    first = "(\n" if shape == "blank-in-parens" else ""
+    return first + (UNFINISHED_SHAPES[shape] + "\n") * lines
+
+
+@pytest.mark.parametrize("shape", UNFINISHED_SHAPES)
+def test_reading_unfinished_input_scales_linearly(shape: str) -> None:
+    small, large = calls_made(unfinished_script(shape, 150)), calls_made(unfinished_script(shape, 600))
+    assert large < small * 5.5, f"4x the lines took {large / small:.1f}x the work"
+
+
+@pytest.mark.parametrize("shape", UNFINISHED_SHAPES)
+def test_unfinished_input_of_3000_lines_is_fast(shape: str) -> None:
+    started = time.monotonic()
+    run_repl(io.StringIO(unfinished_script(shape, 3000)), io.StringIO())
+    assert time.monotonic() - started < 2.0
+
+
+def test_input_finished_after_many_lines_still_runs() -> None:
+    assert feed("[\n" + "1,\n" * 2000 + "].len()\n") == "2000 : Int\n"
+
+
+def test_invalid_utf8_resets_the_line_by_line_decision() -> None:
+    _, out = repl_on_bytes(b'"abc\n\xff\n1 + 1\n')
+    assert "invalid-utf8" in out and "2 : Int" in out
