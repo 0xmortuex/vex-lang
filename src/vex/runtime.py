@@ -124,10 +124,19 @@ def quote(s: str) -> str:
     return f'"{out}"'
 
 
-# Display work items: (value or literal text, how to treat it).
+# Display work items: (value or literal text, how to treat it). _LEAVE marks the end of an Adt's fields.
 _NESTED = 0
 _TOP = 1
 _TEXT = 2
+_LEAVE = 3
+
+# A work item in ``values_equal`` that ends an Adt pair instead of comparing one.
+_LEAVE_PAIR = object()
+
+# Only an Adt can sit on a cycle: the checker rejects a list, map or tuple that contains itself, so a cycle
+# always passes through a struct or enum field. Both walks below track just the Adts on their current path.
+_CYCLIC_DISPLAY = "cannot print a value that contains itself"
+_CYCLIC_EQUAL = "cannot compare values that contain themselves"
 
 
 def _no_charge(units: int) -> None:
@@ -135,11 +144,18 @@ def _no_charge(units: int) -> None:
 
 
 def values_equal(a: Any, b: Any, charge: Callable[[int], None] | None = None) -> bool:
-    """Vex ``==``: the same result as Python's, but without recursion and spending budget as it goes."""
+    """Vex ``==``: the same result as Python's, but without recursion and spending budget as it goes.
+
+    Comparing two values that each contain themselves, and that agree all the way to the cycle, is a runtime error.
+    """
     spend = charge or _no_charge
+    on_path: set[tuple[int, int]] = set()
     work: list[tuple[Any, Any]] = [(a, b)]
     while work:
         x, y = work.pop()
+        if x is _LEAVE_PAIR:
+            on_path.discard(y)
+            continue
         spend(1)
         t = type(x)
         if t is not type(y):
@@ -148,7 +164,13 @@ def values_equal(a: Any, b: Any, charge: Callable[[int], None] | None = None) ->
         elif t is Adt:
             if x.tag != y.tag or x.info is not y.info or len(x.f) != len(y.f):
                 return False
-            work.extend((p, q) for p, q in zip(reversed(x.f), reversed(y.f)) if p is not q)
+            if x.f:
+                pair = (id(x), id(y))
+                if pair in on_path:
+                    raise VexPanic(_CYCLIC_EQUAL)
+                on_path.add(pair)
+                work.append((_LEAVE_PAIR, pair))
+                work.extend((p, q) for p, q in zip(reversed(x.f), reversed(y.f)) if p is not q)
         elif t is list or t is tuple:
             if len(x) != len(y):
                 return False
@@ -214,6 +236,7 @@ def display(v: Any, top: bool = True, charge: Callable[[int], None] | None = Non
     """Format a value the way ``print`` and string interpolation do.
 
     Without recursion, so nesting cannot exhaust the Python stack, and spending budget as text is produced.
+    Printing a value that contains itself is a runtime error.
     """
     if v is None or type(v) in (bool, int, float):
         return _scalar_text(v)
@@ -222,11 +245,15 @@ def display(v: Any, top: bool = True, charge: Callable[[int], None] | None = Non
         spend(len(v))
         return v
     out: list[str] = []
+    on_path: set[int] = set()
     work: list[tuple[Any, int]] = [(v, _TOP if top else _NESTED)]
     while work:
         x, mode = work.pop()
         if mode == _TEXT:
             out.append(x)
+            continue
+        if mode == _LEAVE:
+            on_path.discard(x)
             continue
         spend(1)
         t = type(x)
@@ -240,6 +267,12 @@ def display(v: Any, top: bool = True, charge: Callable[[int], None] | None = Non
             _push_container(work, x, t)
         elif t is Adt:
             spend(len(x.f))
+            if x.f:
+                key = id(x)
+                if key in on_path:
+                    raise VexPanic(_CYCLIC_DISPLAY)
+                on_path.add(key)
+                work.append((key, _LEAVE))
             _push_adt(work, x)
         elif t is range:
             out.append(f"{x.start}..{x.stop}")

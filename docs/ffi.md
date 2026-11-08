@@ -236,6 +236,18 @@ The exact memory guarantee is this. The budget is a work limit, not a memory cap
   35 for `.chars()`, 24 for formatting a list, 2.5 for `.split`. Choose a budget with this in mind: the default of 10,000,000
   units can reach roughly 700 MB at the worst rate above.
 
+## Values that contain themselves
+
+A struct field or enum can be assigned a value that reaches back to itself (`a.next = Some(a)`, or a struct in its own list field).
+Printing and interpolating such a value, and comparing two of them with `==`, `!=`, `assert_eq`, `contains` or `index_of`, is a runtime error:
+status 2 here, exit code 2 from the Vex CLI, at the script location of the operation. It is detected the moment the cycle is
+reached, so it does not spend the budget. `a == a`, on the same object, is simply true, and comparing two values that differ before
+any cycle is reached returns `false`. Two cycles of different lengths whose elements agree still terminate, with the same error. Shared
+values that are not cycles are fine; the check tracks only what is on the current path.
+
+Hashing and ordering cannot reach a cycle. A map key must be `Int`, `Str`, `Bool` or a tuple of those, and only those and lists of
+those can be ordered, so the checker rejects a struct or enum in either position.
+
 ## Threads and re-entry
 
 Everything runs on one OS thread: the thread that ran `Py_Initialize`, which keeps the GIL. A call from any other thread deadlocks and
