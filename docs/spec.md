@@ -1351,13 +1351,36 @@ cannot convert NaN to Int
 
 ## 8. Values and memory
 
-`Int`, `Float`, `Bool`, `Unit`, `Str` and `Range` are immutable. A `Str` is a sequence of Unicode scalar values and is
-indexed by them; `len` counts them. `List`, `Map`, struct values and tuples are **references to objects**: assigning, passing
+`Int`, `Float`, `Bool`, `Unit`, `Str` and `Range` are immutable. A `Str` is a sequence of Unicode scalar values, and
+`len`, `chars`, `char_at` and `slice` count in them; `[]` does not apply to a `Str` (`not-indexable`). `List`, `Map`, struct values and tuples are **references to objects**: assigning, passing
 or capturing one aliases the same object and never copies. A tuple object and an enum value cannot be changed, but they can
 refer to objects that can. The built-in `copy` makes a shallow copy of a `List`.
 
 Vex has no explicit allocation or freeing, no pointers, no destructors and no finalisers. Objects are managed by the host
 runtime, and memory is reclaimed when nothing can reach an object, cycles included; when that happens is not observable.
+
+```vex example val-str-positions
+fn main() {
+    let s = "é😀x";
+    print(s.len());
+    print(s.char_at(1));
+    print(s.slice(0, 2));
+}
+```
+
+```output
+3
+Some("😀")
+é😀
+```
+
+```vex example val-str-not-indexable
+fn main() { print("a"[0]); }
+```
+
+```error
+not-indexable 1:19
+```
 
 ```vex example val-aliasing
 struct P { a: Int }
@@ -1423,7 +1446,7 @@ immutable-binding 1:33
 `==` is structural and needs `Eq`. Values of different variants differ; a struct or enum's fields are compared in order. A
 `Map` compares as a set of key/value pairs, ignoring order. Two ranges are equal if they contain the same numbers, so all
 empty ranges are equal. Elements that are the **same object** are equal without being compared; that makes `a == a` true on
-any value, and also means a `NaN` inside a container can compare equal where a scalar `NaN` does not. Which `NaN` values are the
+any list, map, tuple, struct or enum, even one containing itself. It does not apply to a scalar: a `NaN` is not equal to itself. It also means a `NaN` inside a container can compare equal where a scalar `NaN` does not. Which `NaN` values are the
 same object is unspecified, so code must not rely on equality of containers holding `NaN`.
 
 ```vex example val-equality
@@ -1613,7 +1636,7 @@ no unwinding hook. Everything printed before the panic stays printed. Causes:
 | List index, map key | `index i out of bounds for list of length n`, `key k not found in map` |
 | Conversions | `cannot convert NaN to Int`, `negative exponent in `pow``, `… is not a valid code point` |
 | Self-containing values | `cannot print a value that contains itself`, `cannot compare values that contain themselves` |
-| Limits (section 10) | `string too large`, `list too large (…)`, `stack overflow (…)`, `recursion too deep (…)` |
+| Limits (section 10) | `string too large`, `list too large (…)`, `value is too large to display (…)`, `stack overflow (…)`, `recursion too deep (…)` |
 | Memory | `out of memory` |
 
 ### Compile-time diagnostics
@@ -1756,6 +1779,9 @@ These limits are part of the language. Each one, when exceeded, is a located err
   `Str` or `List`, as a runtime error before allocating. `io.read_file` returns `Err` instead. A `List` or `Map` can pass the cap only
   by growing one `push` or `insert` at a time; builtins then refuse to build a new list from it. There is no cap on total memory, and
   running out is `out of memory`.
+- **Display.** Formatting a value for `print`, `eprint`, interpolation or an assertion message is limited to `MAX_STR_LEN` characters of
+  text, and going over is the runtime error `value is too large to display`, since shared substructure can make the text far longer
+  than the value. A `Str` printed directly is its own text and is not formatted.
 - **Recursion.** A Vex-to-Vex call uses a frame on a heap-allocated stack, limited to 100,000 by count (`stack overflow`). A builtin
   that calls back (`map`, `filter`, …) uses the host's stack too, so such recursion can stop sooner with `recursion too deep`.
 - **Budget.** A program run by `vex run` has no execution budget. An embedded call may spend the budget set by `budget(vm, units)`,
@@ -1776,6 +1802,17 @@ fn main() { print((0..10000001).to_list().len()); }
 
 ```panic
 list too large (10000001 elements, the limit is 10000000)
+```
+
+```vex example lim-display-cap
+fn main() {
+    let s = "a".repeat(26000000);
+    print([s, s]);
+}
+```
+
+```panic
+value is too large to display (over 50000000 characters)
 ```
 
 ```vex example lim-recursion
