@@ -125,7 +125,7 @@ OS / Python combinations.
   `// expect:` header. `tools/gen_error_corpus.py` generated the original corpus from a table (its docstring
   says it is run once and the output is committed).
 - **Syntax:** change `lexer.py` / `parser.py` / `syntax.py`, then every walking stage (`resolver.rx`,
-  `checker.infer_inner`, `compiler.cx_inner`), then `docs/grammar.md`. Nothing checks the grammar document
-  against the parser automatically.
+  `checker.infer_inner`, `compiler.cx_inner`), then the grammar in `docs/spec.md`. `tests/test_spec_conformance.py`
+  checks that grammar against the lexer and parser, in both directions.
 - **Opcode:** add to both the tuple and `NAMES` in `bytecode.py` (an `assert` checks they match), then a
   branch in `VM.execute`. Hot opcodes are placed first because dispatch is a linear `if` / `elif` chain.

@@ -7,7 +7,7 @@ run or a file read during the audit. Hours are rough estimates, not measurements
 
 | | Criterion | Status | Measured evidence |
 |-|-----------|--------|-------------------|
-| a | Written spec | **Partial** | `docs/grammar.md` (137 lines, 6,414 B), `docs/types.md` (151 lines, 8,756 B), `docs/vm.md` (100 lines, 5,474 B). 24 grammar cases checked against the parser: 18 agree, 6 disagree (see below). No evaluation semantics: searching `docs/*.md` for "evaluat", "left to right" or "order of" returns nothing. |
+| a | Written spec | **Met** | [`docs/spec.md`](docs/spec.md) is the single normative document. `tests/test_spec_conformance.py` checks its grammar against the lexer and parser in both directions and runs its examples. |
 | b | 200+ passing tests | **Met** | `uv run pytest -q`: **1773 passed, 0 failed, 0 skipped** in 18.14 s. 941 are seeded fuzz or property cases, leaving 832 others. |
 | c | Fuzzed parser that never crashes | **Not met** | A fuzzer exists (`tests/test_fuzz.py`, 941 pass in 1.19 s) and my 2,000-input ASCII run had 0 crashes. A 55 s run with Unicode digits and huge literals: **571 uncaught `ValueError`s in 40,976 inputs (1.4%)**, 15 distinct messages, all at `lexer.py:160` or `:162`, two root causes. No hangs in the parser (slowest input 44 ms). |
 | d | 10+ example programs | **Not met (9)** | `examples/*.vx`: 9 files, all exit 0, 612 lines in total. Three are toys (`hello`, `fizzbuzz`, `fibonacci`). |
@@ -149,6 +149,8 @@ there is no direct path in either direction; Mort could only spawn `vex` as a su
 - **Files:** `src/vex/api.py`, `src/vex/stdlib.py`, `src/vex/parser.py`, `src/vex/resolver.py`, `src/vex/checker.py`, new `docs/ffi.md`.
 
 ### 5. Finish the spec (criterion a)
+
+**Status: done on branch `docs/spec`.** Disagreements found and how each was settled are in `docs/spec.md`, section 11.
 
 - **Missing:** Evaluation semantics (operand, argument and field order; pattern order; closure capture timing; panic behaviour),
   the 6 grammar drifts, a statement of which document is normative, and a check that keeps grammar and parser aligned.
