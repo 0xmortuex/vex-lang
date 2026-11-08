@@ -23,7 +23,7 @@ from vex.runtime import (
     ok,
     some,
 )
-from vex.symbols import Builtin
+from vex.symbols import Builtin, Scope
 from vex.vtypes import (
     FLOAT,
     INT,
@@ -97,6 +97,17 @@ def ns(space: str, name: str, sig: str, impl: Callable[..., Any]) -> None:
 
 def const(space: str, name: str, ty: Type, value: Any) -> None:
     NAMESPACES[space][name] = Builtin(f"{space}.{name}", [], ty, None, value=value, is_const=True)
+
+
+def _sized(impl: Callable[..., Any]) -> Callable[..., Any]:
+    """Charge the VM's budget for the size of a builtin's result (register with ``needs_vm=True``)."""
+
+    def go(vm: Any, *args: Any) -> Any:
+        result = impl(*args)
+        vm.charge(len(result))
+        return result
+
+    return go
 
 
 def checked(r: int, what: str) -> int:
@@ -213,17 +224,19 @@ def _str_slice(s: str, a: int, b: int) -> str:
     return s[a:b]
 
 
-def _replace(s: str, a: str, b: str) -> str:
+def _replace(vm: Any, s: str, a: str, b: str) -> str:
     if a == "":
         raise VexPanic("`replace` pattern must not be empty")
+    vm.charge(len(s) + s.count(a) * max(0, len(b) - len(a)))
     return s.replace(a, b)
 
 
-def _repeat(s: str, n: int) -> str:
+def _repeat(vm: Any, s: str, n: int) -> str:
     if n < 0:
         raise VexPanic("negative repeat count")
     if len(s) * n > 50_000_000:
         raise VexPanic("string too large")
+    vm.charge(len(s) * n)
     return s * n
 
 
@@ -248,20 +261,20 @@ def _code(s: str) -> int:
 
 method("Str", "len", "(Str) -> Int", len)
 method("Str", "is_empty", "(Str) -> Bool", lambda s: not s)
-method("Str", "upper", "(Str) -> Str", str.upper)
-method("Str", "lower", "(Str) -> Str", str.lower)
+method("Str", "upper", "(Str) -> Str", _sized(str.upper), needs_vm=True)
+method("Str", "lower", "(Str) -> Str", _sized(str.lower), needs_vm=True)
 method("Str", "trim", "(Str) -> Str", str.strip)
 method("Str", "contains", "(Str, Str) -> Bool", lambda s, t: t in s)
 method("Str", "starts_with", "(Str, Str) -> Bool", str.startswith)
 method("Str", "ends_with", "(Str, Str) -> Bool", str.endswith)
-method("Str", "replace", "(Str, Str, Str) -> Str", _replace)
-method("Str", "split", "(Str, Str) -> List[Str]", _split)
-method("Str", "lines", "(Str) -> List[Str]", str.splitlines)
-method("Str", "chars", "(Str) -> List[Str]", list)
-method("Str", "repeat", "(Str, Int) -> Str", _repeat)
+method("Str", "replace", "(Str, Str, Str) -> Str", _replace, needs_vm=True)
+method("Str", "split", "(Str, Str) -> List[Str]", _sized(_split), needs_vm=True)
+method("Str", "lines", "(Str) -> List[Str]", _sized(str.splitlines), needs_vm=True)
+method("Str", "chars", "(Str) -> List[Str]", _sized(list), needs_vm=True)
+method("Str", "repeat", "(Str, Int) -> Str", _repeat, needs_vm=True)
 method("Str", "to_int", "(Str) -> Option[Int]", _str_to_int)
 method("Str", "to_float", "(Str) -> Option[Float]", _str_to_float)
-method("Str", "slice", "(Str, Int, Int) -> Str", _str_slice)
+method("Str", "slice", "(Str, Int, Int) -> Str", _sized(_str_slice), needs_vm=True)
 method("Str", "char_at", "(Str, Int) -> Option[Str]", _char_at)
 method("Str", "index_of", "(Str, Str) -> Option[Int]", _index_of)
 method("Str", "code", "(Str) -> Int", _code)
@@ -320,8 +333,19 @@ def _sum(xs: list[int]) -> int:
     return checked(sum(xs), "sum")
 
 
-def _join(xs: list[str], sep: str) -> str:
+def _join(vm: Any, xs: list[str], sep: str) -> str:
+    vm.charge(sum(map(len, xs)) + len(sep) * len(xs))
     return sep.join(xs)
+
+
+def _extend(vm: Any, xs: list[Any], ys: list[Any]) -> None:
+    vm.charge(len(ys))
+    xs.extend(ys)
+
+
+def _range_to_list(vm: Any, r: range) -> list[int]:
+    vm.charge(max(0, r.stop - r.start))
+    return list(r)
 
 
 def _first(xs: list[Any]) -> Any:
@@ -344,18 +368,18 @@ method("List", "pop", "[T](List[T]) -> Option[T]", _pop, mutates=True)
 method("List", "insert", "[T](List[T], Int, T)", _insert, mutates=True)
 method("List", "remove_at", "[T](List[T], Int) -> T", _remove_at, mutates=True)
 method("List", "clear", "[T](List[T])", lambda xs: xs.clear(), mutates=True)
-method("List", "extend", "[T](List[T], List[T])", lambda xs, ys: xs.extend(ys), mutates=True)
+method("List", "extend", "[T](List[T], List[T])", _extend, mutates=True, needs_vm=True)
 method("List", "reverse", "[T](List[T])", lambda xs: xs.reverse(), mutates=True)
 method("List", "sort", "[T: Ord](List[T])", lambda xs: xs.sort(), mutates=True)
-method("List", "sorted", "[T: Ord](List[T]) -> List[T]", sorted)
+method("List", "sorted", "[T: Ord](List[T]) -> List[T]", _sized(sorted), needs_vm=True)
 method("List", "get", "[T](List[T], Int) -> Option[T]", _get)
 method("List", "first", "[T](List[T]) -> Option[T]", _first)
 method("List", "last", "[T](List[T]) -> Option[T]", _last)
 method("List", "contains", "[T: Eq](List[T], T) -> Bool", lambda xs, x: x in xs)
 method("List", "index_of", "[T: Eq](List[T], T) -> Option[Int]", _index_of_list)
-method("List", "slice", "[T](List[T], Int, Int) -> List[T]", _list_slice)
-method("List", "concat", "[T](List[T], List[T]) -> List[T]", lambda xs, ys: xs + ys)
-method("List", "copy", "[T](List[T]) -> List[T]", list)
+method("List", "slice", "[T](List[T], Int, Int) -> List[T]", _sized(_list_slice), needs_vm=True)
+method("List", "concat", "[T](List[T], List[T]) -> List[T]", _sized(lambda xs, ys: xs + ys), needs_vm=True)
+method("List", "copy", "[T](List[T]) -> List[T]", _sized(list), needs_vm=True)
 method("List", "map", "[T, U](List[T], fn(T) -> U) -> List[U]",
        lambda vm, xs, f: [vm.call(f, [x]) for x in list(xs)], needs_vm=True)  # fmt: skip
 method("List", "filter", "[T](List[T], fn(T) -> Bool) -> List[T]",
@@ -367,11 +391,11 @@ method("List", "all", "[T](List[T], fn(T) -> Bool) -> Bool",
        lambda vm, xs, f: all(vm.call(f, [x]) for x in list(xs)), needs_vm=True)  # fmt: skip
 method("List", "find", "[T](List[T], fn(T) -> Bool) -> Option[T]", _find, needs_vm=True)
 method("List", "for_each", "[T](List[T], fn(T) -> Unit)", _for_each, needs_vm=True)
-method("List", "enumerate", "[T](List[T]) -> List[(Int, T)]", lambda xs: list(enumerate(xs)))
-method("List", "zip", "[T, U](List[T], List[U]) -> List[(T, U)]", lambda xs, ys: list(zip(xs, ys)))
+method("List", "enumerate", "[T](List[T]) -> List[(Int, T)]", _sized(lambda xs: list(enumerate(xs))), needs_vm=True)
+method("List", "zip", "[T, U](List[T], List[U]) -> List[(T, U)]", _sized(lambda xs, ys: list(zip(xs, ys))), needs_vm=True)
 method("List", "sum", "(List[Int]) -> Int", _sum)
 method("List", "sum_float", "(List[Float]) -> Float", lambda xs: math.fsum(xs))
-method("List", "join", "(List[Str], Str) -> Str", _join)
+method("List", "join", "(List[Str], Str) -> Str", _join, needs_vm=True)
 
 
 # ------------------------------------------------------------------ Map
@@ -390,9 +414,9 @@ method("Map", "insert", "[K, V](Map[K, V], K, V)", lambda m, k, v: m.__setitem__
 method("Map", "remove", "[K, V](Map[K, V], K) -> Option[V]", _map_remove, mutates=True)
 method("Map", "clear", "[K, V](Map[K, V])", lambda m: m.clear(), mutates=True)
 method("Map", "contains_key", "[K, V](Map[K, V], K) -> Bool", lambda m, k: k in m)
-method("Map", "keys", "[K, V](Map[K, V]) -> List[K]", lambda m: list(m.keys()))
-method("Map", "values", "[K, V](Map[K, V]) -> List[V]", lambda m: list(m.values()))
-method("Map", "entries", "[K, V](Map[K, V]) -> List[(K, V)]", lambda m: list(m.items()))
+method("Map", "keys", "[K, V](Map[K, V]) -> List[K]", _sized(lambda m: list(m.keys())), needs_vm=True)
+method("Map", "values", "[K, V](Map[K, V]) -> List[V]", _sized(lambda m: list(m.values())), needs_vm=True)
+method("Map", "entries", "[K, V](Map[K, V]) -> List[(K, V)]", _sized(lambda m: list(m.items())), needs_vm=True)
 
 
 # ------------------------------------------------------------------ Option / Result
@@ -452,7 +476,7 @@ method("Result", "and_then", "[T, E, U](Result[T, E], fn(T) -> Result[U, E]) -> 
        lambda vm, r, f: r if r.tag == 1 else vm.call(f, [r.f[0]]), needs_vm=True)  # fmt: skip
 
 # ------------------------------------------------------------------ Range
-method("Range", "to_list", "(Range) -> List[Int]", list)
+method("Range", "to_list", "(Range) -> List[Int]", _range_to_list, needs_vm=True)
 method("Range", "len", "(Range) -> Int", len)
 method("Range", "contains", "(Range, Int) -> Bool", lambda r, x: x in r)
 
@@ -540,3 +564,6 @@ _reg(NAMESPACES["env"], "env.args", "args", "() -> List[Str]", lambda vm: list(v
 
 # Which Vex type constructor names own which method tables.
 METHOD_HEADS = {"Int", "Float", "Bool", "Str", "List", "Map", "Option", "Result", "Range"}
+
+# The scope seen by programs that are not embedded: everything.
+FULL_SCOPE = Scope(GLOBALS, NAMESPACES)

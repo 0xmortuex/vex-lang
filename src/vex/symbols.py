@@ -131,6 +131,24 @@ class Builtin:
         self.is_const = is_const
 
 
+class Scope:
+    """The built-in names one compilation can see.
+
+    The CLI and REPL use every name in the standard library. An embedded script gets a filtered copy,
+    and ``denied`` maps each withheld name (``print``, ``io.write_file``) to the reason it is withheld.
+    """
+
+    def __init__(
+        self,
+        globals: dict[str, Builtin],
+        namespaces: dict[str, dict[str, Builtin]],
+        denied: dict[str, str] | None = None,
+    ) -> None:
+        self.globals = globals
+        self.namespaces = namespaces
+        self.denied = denied or {}
+
+
 class NamespaceSym:
     def __init__(self, name: str) -> None:
         self.name = name

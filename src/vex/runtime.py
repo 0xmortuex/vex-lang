@@ -26,6 +26,14 @@ class VexPanic(Exception):
         self.trace: list[Any] | None = None
 
 
+class VexBudgetExceeded(VexPanic):
+    """The embedded script used up its execution budget."""
+
+
+class VexHostContractError(VexPanic):
+    """A host function broke its declared signature (wrong type, bad UTF-8, out-of-range Int)."""
+
+
 class VexExit(Exception):
     def __init__(self, code: int) -> None:
         super().__init__(f"exit({code})")

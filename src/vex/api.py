@@ -12,7 +12,7 @@ from vex.compiler import Compiler
 from vex.diagnostics import Diagnostic, DiagSink, Source, Span, VexError
 from vex.parser import parse_source
 from vex.resolver import Resolver, make_env
-from vex.symbols import Env, FnSym
+from vex.symbols import Env, FnSym, Scope
 from vex.vtypes import INT, UNIT, Mismatch, prune, show, unify
 
 
@@ -38,9 +38,10 @@ def read_source(path: str) -> Source:
 class Loader:
     """Parses the root module and everything it imports (depth first, dependencies first)."""
 
-    def __init__(self, sink: DiagSink, base_dir: str | None) -> None:
+    def __init__(self, sink: DiagSink, base_dir: str | None, allow_imports: bool = True) -> None:
         self.sink = sink
         self.base_dir = base_dir
+        self.allow_imports = allow_imports
         self.done: dict[str, ast.Module] = {}
         self.order: list[ast.Module] = []
         self.stack: list[str] = []
@@ -62,6 +63,10 @@ class Loader:
 
     def do_import(self, imp: ast.Import, directory: str | None) -> None:
         name = imp.name
+        if not self.allow_imports:
+            self.sink.error("import-denied", f"embedded scripts cannot import `{name}`", imp.span,
+                            "not available here", help="the host supplies the whole script as one source text")  # fmt: skip
+            return
         if directory is None:
             self.sink.error("import-not-found", f"cannot find module `{name}`", imp.span,
                             "imports need a source file on disk")  # fmt: skip
@@ -107,23 +112,27 @@ def check_main(env: Env, sink: DiagSink) -> FnSym | None:
     return m
 
 
-def compile_source(source: Source, require_main: bool = True) -> Program:
+def compile_source(
+    source: Source, require_main: bool = True, scope: Scope | None = None, allow_imports: bool = True
+) -> Program:
     """Compile a source file (and its imports). Raises VexError with all diagnostics."""
     try:
-        return _compile(source, require_main)
+        return _compile(source, require_main, scope, allow_imports)
     except RecursionError:
         raise VexError([Diagnostic("too-deep", "program is nested too deeply to compile",
                                    Span(source, 0, 1), "simplify the deepest expression")]) from None  # fmt: skip
 
 
-def _compile(source: Source, require_main: bool) -> Program:
+def _compile(
+    source: Source, require_main: bool, scope: Scope | None = None, allow_imports: bool = True
+) -> Program:
     sink = DiagSink()
     base = os.path.dirname(os.path.abspath(source.path)) if os.path.exists(source.path) else None
-    loader = Loader(sink, base)
+    loader = Loader(sink, base, allow_imports)
     loader.load_root(source)
     sink.raise_if_errors()
     env = make_env()
-    resolver = Resolver(env, sink)
+    resolver = Resolver(env, sink, scope=scope)
     fns = resolver.resolve_modules(loader.order)
     Checker(env, sink).check_all(fns)
     if require_main:

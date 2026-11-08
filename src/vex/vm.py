@@ -85,11 +85,13 @@ from vex.runtime import (
     BuiltinFn,
     Cell,
     Closure,
+    VexBudgetExceeded,
     VexPanic,
     display,
 )
 
 MAX_DEPTH = 100_000
+BUDGET_MESSAGE = "execution budget exhausted"
 _DONE = object()
 
 
@@ -99,10 +101,19 @@ class VM:
         self.args = args or []
         self.frames: list[tuple[Code, int, list[Any], list[Any]]] = []
         self.globals: dict[str, Any] = {}
+        # Units left in the current embedded call. Infinite for programs outside an embedding.
+        self.fuel: float = math.inf
 
     # ------------------------------------------------------------ public API
+    def charge(self, units: int) -> None:
+        """Spend budget; builtins call this for work proportional to the size they create."""
+        self.fuel -= units
+        if self.fuel < 0:
+            raise VexBudgetExceeded(BUDGET_MESSAGE)
+
     def call(self, f: Any, args: list[Any]) -> Any:
         """Call a Vex function value from Python (used by higher-order builtins)."""
+        self.charge(1)
         if type(f) is Closure:
             code = f.code
             locals_ = f.captured + args
@@ -182,6 +193,9 @@ class VM:
                     locals_[arg] = pop()
                 elif op == CALL_FN:
                     fcode, n = arg
+                    self.fuel -= 1
+                    if self.fuel < 0:
+                        raise VexBudgetExceeded(BUDGET_MESSAGE)
                     if len(frames) >= MAX_DEPTH:
                         raise VexPanic(f"stack overflow (more than {MAX_DEPTH} nested calls)")
                     if n:
@@ -208,6 +222,10 @@ class VM:
                     pop = stack.pop
                     push(val)
                 elif op == JMP:
+                    if arg < pc:  # a loop back-edge
+                        self.fuel -= 1
+                        if self.fuel < 0:
+                            raise VexBudgetExceeded(BUDGET_MESSAGE)
                     pc = arg
                 elif op == LT:
                     b = pop()
@@ -306,6 +324,9 @@ class VM:
                         args = []
                     pop()
                     if type(f) is Closure:
+                        self.fuel -= 1
+                        if self.fuel < 0:
+                            raise VexBudgetExceeded(BUDGET_MESSAGE)
                         if len(frames) >= MAX_DEPTH:
                             raise VexPanic(f"stack overflow (more than {MAX_DEPTH} nested calls)")
                         frames.append((code, pc, locals_, stack))
@@ -382,6 +403,7 @@ class VM:
                     stack[-1] = r
                 elif op == ADD_S:
                     b = pop()
+                    self.charge(len(stack[-1]) + len(b))
                     stack[-1] = stack[-1] + b
                 elif op == MAKE_LIST:
                     if arg:
@@ -444,7 +466,9 @@ class VM:
                 elif op == BUILD_STR:
                     parts = stack[-arg:]
                     del stack[-arg:]
-                    push("".join([p if type(p) is str else display(p) for p in parts]))
+                    built = "".join([p if type(p) is str else display(p) for p in parts])
+                    self.charge(len(built))
+                    push(built)
                 elif op == TRY:
                     v = stack[-1]
                     if v.tag == 1:
@@ -475,7 +499,9 @@ class VM:
                     raise AssertionError(f"unknown opcode {op}")
         except VexPanic as e:
             if e.trace is None:
-                e.trace = self.make_trace(code, pc - 1, frames)
+                # A builtin that takes the VM runs with the calling frame pushed; do not report it twice.
+                outer = frames[:-1] if frames and frames[-1][2] is locals_ else frames
+                e.trace = self.make_trace(code, pc - 1, outer)
             raise
 
 
