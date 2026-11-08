@@ -85,34 +85,90 @@ from vex.runtime import (
     BuiltinFn,
     Cell,
     Closure,
+    VexBudgetExceeded,
+    VexExit,
     VexPanic,
+    charge_size,
     display,
+    values_equal,
 )
 
 MAX_DEPTH = 100_000
+BUDGET_MESSAGE = "execution budget exhausted"
+
+# Each level of a builtin calling back into Vex costs at most about 5 Python frames. In an embedding this cap,
+# with the host re-entry cap, keeps every callback from native code well inside Python's recursion limit.
+MAX_CALLBACK_DEPTH = 100
+# A closure and an empty map are several Python objects: charged here so their memory stays within a unit's rate.
+CLOSURE_COST = 2
+MAP_BASE_COST = 8
+_FLAT = frozenset({int, float, bool, type(None)})
 _DONE = object()
 
 
 class VM:
+    callback_depth = 0  # process-wide: nesting crosses instances when hosts re-enter each other
+
     def __init__(self, out: TextIO | None = None, args: list[str] | None = None) -> None:
         self.out: Any = out if out is not None else sys.stdout
         self.args = args or []
         self.frames: list[tuple[Code, int, list[Any], list[Any]]] = []
         self.globals: dict[str, Any] = {}
+        # Units left in the current embedded call. Infinite for programs outside an embedding.
+        self.fuel: float = math.inf
+        self.embedded = False  # an embedded VM caps callback nesting and locates internal failures
 
     # ------------------------------------------------------------ public API
+    def charge(self, units: int) -> None:
+        """Spend budget; builtins call this for work proportional to the size they create."""
+        self.fuel -= units
+        if self.fuel < 0:
+            raise VexBudgetExceeded(BUDGET_MESSAGE)
+
+    def charge_key(self, key: Any) -> None:
+        """Spend budget for hashing and comparing a map key: a key is a scalar, a Str, or a tuple of those."""
+        if type(key) is str:
+            self.charge(len(key))
+        elif type(key) is tuple:
+            charge_size(key, self.charge)
+
+    def equal(self, a: Any, b: Any) -> bool:
+        """Vex ``==``, charged to the budget while it compares."""
+        return values_equal(a, b, self.charge)
+
+    def _order(self, op: int, a: Any, b: Any) -> bool:
+        """``<`` and friends on strings and sequences: charge for the data, then compare."""
+        if type(a) is str:
+            self.charge(min(len(a), len(b)))
+        else:
+            charge_size(a, self.charge)
+        if op == LT:
+            return bool(a < b)
+        if op == LE:
+            return bool(a <= b)
+        if op == GT:
+            return bool(a > b)
+        return bool(a >= b)
+
     def call(self, f: Any, args: list[Any]) -> Any:
         """Call a Vex function value from Python (used by higher-order builtins)."""
-        if type(f) is Closure:
-            code = f.code
-            locals_ = f.captured + args
-            pad = code.nlocals - len(locals_)
-            if pad > 0:
-                locals_ = locals_ + [None] * pad
-            return self.execute(code, locals_)
-        if type(f) is BuiltinFn:
-            return f.fn(self, *args) if f.needs_vm else f.fn(*args)
-        raise VexPanic(f"value of type {type(f).__name__} is not callable")  # pragma: no cover
+        self.charge(1 + (f.code.nlocals if type(f) is Closure else len(args)))
+        if self.embedded and VM.callback_depth >= MAX_CALLBACK_DEPTH:
+            raise VexPanic(f"recursion through builtins is too deep (more than {MAX_CALLBACK_DEPTH} levels)")
+        VM.callback_depth += 1
+        try:
+            if type(f) is Closure:
+                code = f.code
+                locals_ = f.captured + args
+                pad = code.nlocals - len(locals_)
+                if pad > 0:
+                    locals_ = locals_ + [None] * pad
+                return self.execute(code, locals_)
+            if type(f) is BuiltinFn:
+                return f.fn(self, *args) if f.needs_vm else f.fn(*args)
+            raise VexPanic(f"value of type {type(f).__name__} is not callable")  # pragma: no cover
+        finally:
+            VM.callback_depth -= 1
 
     def run_function(self, code: Code, args: list[Any] | None = None) -> Any:
         """Run a top-level function to completion, converting failures to VexRuntimeError."""
@@ -182,6 +238,9 @@ class VM:
                     locals_[arg] = pop()
                 elif op == CALL_FN:
                     fcode, n = arg
+                    self.fuel -= 1 + fcode.nlocals
+                    if self.fuel < 0:
+                        raise VexBudgetExceeded(BUDGET_MESSAGE)
                     if len(frames) >= MAX_DEPTH:
                         raise VexPanic(f"stack overflow (more than {MAX_DEPTH} nested calls)")
                     if n:
@@ -208,10 +267,17 @@ class VM:
                     pop = stack.pop
                     push(val)
                 elif op == JMP:
+                    if arg < pc:  # a loop back-edge
+                        self.fuel -= 1
+                        if self.fuel < 0:
+                            raise VexBudgetExceeded(BUDGET_MESSAGE)
                     pc = arg
                 elif op == LT:
                     b = pop()
-                    stack[-1] = stack[-1] < b
+                    if type(b) in _FLAT:
+                        stack[-1] = stack[-1] < b
+                    else:
+                        stack[-1] = self._order(LT, stack[-1], b)
                 elif op == MUL_I:
                     b = pop()
                     r = stack[-1] * b
@@ -244,23 +310,38 @@ class VM:
                         stack[-1] = q
                 elif op == EQ:
                     b = pop()
-                    stack[-1] = stack[-1] == b
+                    if type(b) in _FLAT:
+                        stack[-1] = stack[-1] == b
+                    else:
+                        stack[-1] = values_equal(stack[-1], b, self.charge)
                 elif op == LOAD_CELL:
                     push(locals_[arg].v)
                 elif op == POP:
                     pop()
                 elif op == LE:
                     b = pop()
-                    stack[-1] = stack[-1] <= b
+                    if type(b) in _FLAT:
+                        stack[-1] = stack[-1] <= b
+                    else:
+                        stack[-1] = self._order(LE, stack[-1], b)
                 elif op == GT:
                     b = pop()
-                    stack[-1] = stack[-1] > b
+                    if type(b) in _FLAT:
+                        stack[-1] = stack[-1] > b
+                    else:
+                        stack[-1] = self._order(GT, stack[-1], b)
                 elif op == GE:
                     b = pop()
-                    stack[-1] = stack[-1] >= b
+                    if type(b) in _FLAT:
+                        stack[-1] = stack[-1] >= b
+                    else:
+                        stack[-1] = self._order(GE, stack[-1], b)
                 elif op == NE:
                     b = pop()
-                    stack[-1] = stack[-1] != b
+                    if type(b) in _FLAT:
+                        stack[-1] = stack[-1] != b
+                    else:
+                        stack[-1] = not values_equal(stack[-1], b, self.charge)
                 elif op == LE_LK:
                     push(locals_[arg[0]] <= arg[1])
                 elif op == GT_LK:
@@ -295,6 +376,7 @@ class VM:
                 elif op == STORE_CELL:
                     locals_[arg].v = pop()
                 elif op == MAKE_CELL:
+                    self.charge(1)
                     locals_[arg] = Cell(locals_[arg])
                 elif op == CALL:
                     n = arg
@@ -306,6 +388,9 @@ class VM:
                         args = []
                     pop()
                     if type(f) is Closure:
+                        self.fuel -= 1 + f.code.nlocals
+                        if self.fuel < 0:
+                            raise VexBudgetExceeded(BUDGET_MESSAGE)
                         if len(frames) >= MAX_DEPTH:
                             raise VexPanic(f"stack overflow (more than {MAX_DEPTH} nested calls)")
                         frames.append((code, pc, locals_, stack))
@@ -320,6 +405,7 @@ class VM:
                         if pad > 0:
                             locals_ = locals_ + [None] * pad
                     else:
+                        self.charge(1 + n)
                         if f.needs_vm:
                             frames.append((code, pc, locals_, stack))
                             r = f.fn(self, *args)
@@ -329,6 +415,7 @@ class VM:
                         push(r)
                 elif op == CALL_BI:
                     impl, n = arg
+                    self.charge(1 + n)
                     if n:
                         args = stack[-n:]
                         del stack[-n:]
@@ -337,6 +424,7 @@ class VM:
                         push(impl())
                 elif op == CALL_BIV:
                     impl, n = arg
+                    self.charge(1 + n)
                     if n:
                         args = stack[-n:]
                         del stack[-n:]
@@ -348,6 +436,7 @@ class VM:
                     push(r)
                 elif op == MAKE_ADT:
                     info, tag, n = arg
+                    self.charge(1 + n)
                     if n:
                         fields = stack[-n:]
                         del stack[-n:]
@@ -382,8 +471,10 @@ class VM:
                     stack[-1] = r
                 elif op == ADD_S:
                     b = pop()
+                    self.charge(len(stack[-1]) + len(b))
                     stack[-1] = stack[-1] + b
                 elif op == MAKE_LIST:
+                    self.charge(1 + arg)
                     if arg:
                         items = stack[-arg:]
                         del stack[-arg:]
@@ -391,14 +482,18 @@ class VM:
                         items = []
                     push(items)
                 elif op == MAKE_TUPLE:
+                    self.charge(1 + arg)
                     items = stack[-arg:]
                     del stack[-arg:]
                     push(tuple(items))
                 elif op == MAKE_MAP:
+                    self.charge(MAP_BASE_COST + 2 * arg)
                     n2 = arg * 2
                     flat = stack[-n2:] if n2 else []
                     if n2:
                         del stack[-n2:]
+                    for i in range(0, n2, 2):
+                        self.charge_key(flat[i])
                     push({flat[i]: flat[i + 1] for i in range(0, n2, 2)})
                 elif op == INDEX:
                     i = pop()
@@ -408,8 +503,9 @@ class VM:
                             raise VexPanic(f"index {i} out of bounds for list of length {len(obj)}")
                         stack[-1] = obj[i]
                     else:
+                        self.charge_key(i)
                         if i not in obj:
-                            raise VexPanic(f"key {display(i, False)} not found in map")
+                            raise VexPanic(f"key {display(i, False, self.charge)} not found in map")
                         stack[-1] = obj[i]
                 elif op == SET_INDEX:
                     v = pop()
@@ -418,6 +514,8 @@ class VM:
                     if type(obj) is list:
                         if i < 0 or i >= len(obj):
                             raise VexPanic(f"index {i} out of bounds for list of length {len(obj)}")
+                    else:
+                        self.charge_key(i)
                     obj[i] = v
                 elif op == SET_FIELD:
                     v = pop()
@@ -436,15 +534,23 @@ class VM:
                     else:
                         push(nxt)
                 elif op == RANGE:
+                    self.charge(arg)
                     hi = pop()
                     stack[-1] = range(stack[-1], hi)
                 elif op == RANGE_INCL:
+                    self.charge(arg)
                     hi = pop()
                     stack[-1] = range(stack[-1], hi + 1)
                 elif op == BUILD_STR:
+                    self.charge(arg)
                     parts = stack[-arg:]
                     del stack[-arg:]
-                    push("".join([p if type(p) is str else display(p) for p in parts]))
+                    pieces: list[str] = []
+                    for p in parts:  # each part's size is known here, so a stop comes before the join copies anything
+                        piece = p if type(p) is str else display(p, charge=self.charge)
+                        self.charge(len(piece))
+                        pieces.append(piece)
+                    push("".join(pieces))
                 elif op == TRY:
                     v = stack[-1]
                     if v.tag == 1:
@@ -459,6 +565,7 @@ class VM:
                         stack[-1] = v.f[0]
                 elif op == MAKE_CLOSURE:
                     fcode, k = arg
+                    self.charge(CLOSURE_COST + k)
                     if k:
                         cap = stack[-k:]
                         del stack[-k:]
@@ -475,8 +582,22 @@ class VM:
                     raise AssertionError(f"unknown opcode {op}")
         except VexPanic as e:
             if e.trace is None:
-                e.trace = self.make_trace(code, pc - 1, frames)
+                e.trace = self._located_trace(code, pc, locals_, frames)
             raise
+        except VexExit:
+            raise
+        except Exception as e:
+            if not self.embedded:
+                raise
+            what = "recursion too deep" if isinstance(e, RecursionError) else f"internal error: {type(e).__name__}: {e}"
+            panic = VexPanic(what)
+            panic.trace = self._located_trace(code, pc, locals_, frames)
+            raise panic from None
+
+    def _located_trace(self, code: Code, pc: int, locals_: list[Any], frames: list[Any]) -> list[tuple[str, Span | None]]:
+        # A builtin that takes the VM runs with the calling frame pushed; do not report it twice.
+        outer = frames[:-1] if frames and frames[-1][2] is locals_ else frames
+        return self.make_trace(code, pc - 1, outer)
 
 
 def _span_at(code: Code, pc: int) -> Span | None:

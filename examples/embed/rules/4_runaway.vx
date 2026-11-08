@@ -1,0 +1,8 @@
+// A rule that never finishes. The host's budget stops it.
+fn price(quantity: Int, unit_cents: Int, customer: Str) -> Int {
+    let mut spins = 0;
+    while true {
+        spins += 1;
+    }
+    spins
+}

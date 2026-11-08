@@ -10,7 +10,7 @@ from vex.diagnostics import DiagSink, Source, VexError, VexRuntimeError, render_
 from vex.lexer import Lexer
 from vex.parser import parse_source
 from vex.resolver import Resolver, make_env
-from vex.runtime import VexExit, display
+from vex.runtime import VexExit, VexPanic, display
 from vex.symbols import Env
 from vex.vm import VM
 from vex.vtypes import is_unit, show, zonk
@@ -97,7 +97,10 @@ class Session:
         value = self.vm.run_function(repl_fn.code)
         if mod.tail is None or is_unit(ret):
             return ""
-        return f"{display(value, False)} : {show(ret)}"
+        try:
+            return f"{display(value, False)} : {show(ret)}"
+        except VexPanic as e:  # the value contains itself
+            raise VexRuntimeError(e.message, []) from None
 
     def handle(self, text: str, run: bool = True) -> None:
         """Evaluate and print results/diagnostics to the session output."""

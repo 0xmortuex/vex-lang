@@ -1,0 +1,9 @@
+// A second set of rules, loaded by the same executable: a flat holiday discount plus a bulk rebate.
+fn price(quantity: Int, unit_cents: Int, customer: Str) -> Int {
+    let subtotal = quantity * unit_cents;
+    let holiday = subtotal * 20 / 100;
+    let bulk = if quantity >= 10 { unit_cents } else { 0 };
+    let bonus = if host.customer_tier(customer).upper() == "GOLD" { 500 } else { 0 };
+    let net = subtotal - holiday - bulk - bonus;
+    net + host.tax_cents(net)
+}

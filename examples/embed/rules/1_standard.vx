@@ -1,0 +1,11 @@
+// The standard rules: a tier discount, then tax from the host.
+fn price(quantity: Int, unit_cents: Int, customer: Str) -> Int {
+    let subtotal = quantity * unit_cents;
+    let discount = match host.customer_tier(customer) {
+        "gold" => subtotal * 10 / 100,
+        "silver" => subtotal * 5 / 100,
+        _ => 0,
+    };
+    let net = subtotal - discount;
+    net + host.tax_cents(net)
+}

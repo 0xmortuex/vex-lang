@@ -18,12 +18,13 @@ from vex.runtime import (
     NONE,
     VexExit,
     VexPanic,
+    charge_size,
     display,
     err,
     ok,
     some,
 )
-from vex.symbols import Builtin
+from vex.symbols import Builtin, Scope
 from vex.vtypes import (
     FLOAT,
     INT,
@@ -91,12 +92,41 @@ def glob(name: str, sig: str, impl: Callable[..., Any], needs_vm: bool = False) 
     _reg(GLOBALS, name, name, sig, impl, needs_vm=needs_vm)
 
 
-def ns(space: str, name: str, sig: str, impl: Callable[..., Any]) -> None:
-    _reg(NAMESPACES[space], f"{space}.{name}", name, sig, impl)
+def ns(space: str, name: str, sig: str, impl: Callable[..., Any], needs_vm: bool = False) -> None:
+    _reg(NAMESPACES[space], f"{space}.{name}", name, sig, impl, needs_vm=needs_vm)
 
 
 def const(space: str, name: str, ty: Type, value: Any) -> None:
     NAMESPACES[space][name] = Builtin(f"{space}.{name}", [], ty, None, value=value, is_const=True)
+
+
+def _by_input(impl: Callable[..., Any], factor: int = 1) -> Callable[..., Any]:
+    """Charge the size of a builtin's text and collection arguments before it runs (``needs_vm=True``).
+
+    A builder that makes a new object per element passes a higher ``factor``, so a unit buys the same memory everywhere.
+    """
+
+    def go(vm: Any, *args: Any) -> Any:
+        vm.charge(factor * sum(len(a) for a in args if type(a) in (str, list, dict)))
+        return impl(*args)
+
+    return go
+
+
+def _by_key(impl: Callable[..., Any]) -> Callable[..., Any]:
+    """Charge the size of a builtin's map key before it runs (``needs_vm=True``); see ``VM.charge_key``."""
+
+    def go(vm: Any, m: Any, key: Any, *rest: Any) -> Any:
+        vm.charge_key(key)
+        return impl(m, key, *rest)
+
+    return go
+
+
+def _snapshot(vm: Any, xs: list[Any]) -> list[Any]:
+    """A callback may change ``xs``, so loop over a copy. The copy is real work, charged before it is made."""
+    vm.charge(len(xs))
+    return list(xs)
 
 
 def checked(r: int, what: str) -> int:
@@ -107,11 +137,11 @@ def checked(r: int, what: str) -> int:
 
 # ------------------------------------------------------------------ global functions
 def _print(vm: Any, x: Any) -> None:
-    vm.out.write(display(x) + "\n")
+    vm.out.write(display(x, charge=vm.charge) + "\n")
 
 
 def _eprint(vm: Any, x: Any) -> None:
-    sys.stderr.write(display(x) + "\n")
+    sys.stderr.write(display(x, charge=vm.charge) + "\n")
 
 
 def _panic(msg: str) -> None:
@@ -123,9 +153,10 @@ def _assert(c: bool) -> None:
         raise VexPanic("assertion failed")
 
 
-def _assert_eq(a: Any, b: Any) -> None:
-    if a != b:
-        raise VexPanic(f"assertion failed: left = {display(a, False)}, right = {display(b, False)}")
+def _assert_eq(vm: Any, a: Any, b: Any) -> None:
+    if not vm.equal(a, b):
+        left, right = display(a, False, vm.charge), display(b, False, vm.charge)
+        raise VexPanic(f"assertion failed: left = {left}, right = {right}")
 
 
 def _exit(code: int) -> None:
@@ -136,7 +167,7 @@ glob("print", "[T](T)", _print, needs_vm=True)
 glob("eprint", "[T](T)", _eprint, needs_vm=True)
 glob("panic", "(Str) -> Never", _panic)
 glob("assert", "(Bool)", _assert)
-glob("assert_eq", "[T: Eq](T, T)", _assert_eq)
+glob("assert_eq", "[T: Eq](T, T)", _assert_eq, needs_vm=True)
 glob("exit", "(Int) -> Never", _exit)
 
 
@@ -163,7 +194,7 @@ def _to_int(f: float) -> int:
 
 
 def _to_char(n: int) -> str:
-    if n < 0 or n > 0x10FFFF:
+    if n < 0 or n > 0x10FFFF or 0xD800 <= n <= 0xDFFF:
         raise VexPanic(f"{n} is not a valid code point")
     return chr(n)
 
@@ -190,7 +221,7 @@ method("Bool", "to_str", "(Bool) -> Str", display)
 
 # ------------------------------------------------------------------ Str
 _INT_RE = re.compile(r"[+-]?[0-9]+")
-_FLOAT_RE = re.compile(r"[+-]?([0-9]+\.?[0-9]*|\.[0-9]+)([eE][+-]?[0-9]+)?")
+_FLOAT_RE = re.compile(r"[+-]?([0-9]+(\.[0-9]*)?|\.[0-9]+)([eE][+-]?[0-9]+)?")
 
 
 def _str_to_int(s: str) -> Any:
@@ -207,23 +238,27 @@ def _str_to_float(s: str) -> Any:
     return some(float(s)) if _FLOAT_RE.fullmatch(s) else NONE
 
 
-def _str_slice(s: str, a: int, b: int) -> str:
+def _str_slice(vm: Any, s: str, a: int, b: int) -> str:
     if a < 0 or b > len(s) or a > b:
         raise VexPanic(f"slice {a}..{b} out of range for string of length {len(s)}")
+    vm.charge(b - a)
     return s[a:b]
 
 
-def _replace(s: str, a: str, b: str) -> str:
+def _replace(vm: Any, s: str, a: str, b: str) -> str:
     if a == "":
         raise VexPanic("`replace` pattern must not be empty")
+    vm.charge(len(s) + len(a))
+    vm.charge(s.count(a) * max(0, len(b) - len(a)))
     return s.replace(a, b)
 
 
-def _repeat(s: str, n: int) -> str:
+def _repeat(vm: Any, s: str, n: int) -> str:
     if n < 0:
         raise VexPanic("negative repeat count")
     if len(s) * n > 50_000_000:
         raise VexPanic("string too large")
+    vm.charge(len(s) * n)
     return s * n
 
 
@@ -248,22 +283,22 @@ def _code(s: str) -> int:
 
 method("Str", "len", "(Str) -> Int", len)
 method("Str", "is_empty", "(Str) -> Bool", lambda s: not s)
-method("Str", "upper", "(Str) -> Str", str.upper)
-method("Str", "lower", "(Str) -> Str", str.lower)
-method("Str", "trim", "(Str) -> Str", str.strip)
-method("Str", "contains", "(Str, Str) -> Bool", lambda s, t: t in s)
-method("Str", "starts_with", "(Str, Str) -> Bool", str.startswith)
-method("Str", "ends_with", "(Str, Str) -> Bool", str.endswith)
-method("Str", "replace", "(Str, Str, Str) -> Str", _replace)
-method("Str", "split", "(Str, Str) -> List[Str]", _split)
-method("Str", "lines", "(Str) -> List[Str]", str.splitlines)
-method("Str", "chars", "(Str) -> List[Str]", list)
-method("Str", "repeat", "(Str, Int) -> Str", _repeat)
-method("Str", "to_int", "(Str) -> Option[Int]", _str_to_int)
-method("Str", "to_float", "(Str) -> Option[Float]", _str_to_float)
-method("Str", "slice", "(Str, Int, Int) -> Str", _str_slice)
+method("Str", "upper", "(Str) -> Str", _by_input(str.upper), needs_vm=True)
+method("Str", "lower", "(Str) -> Str", _by_input(str.lower), needs_vm=True)
+method("Str", "trim", "(Str) -> Str", _by_input(str.strip), needs_vm=True)
+method("Str", "contains", "(Str, Str) -> Bool", _by_input(lambda s, t: t in s), needs_vm=True)
+method("Str", "starts_with", "(Str, Str) -> Bool", _by_input(str.startswith), needs_vm=True)
+method("Str", "ends_with", "(Str, Str) -> Bool", _by_input(str.endswith), needs_vm=True)
+method("Str", "replace", "(Str, Str, Str) -> Str", _replace, needs_vm=True)
+method("Str", "split", "(Str, Str) -> List[Str]", _by_input(_split), needs_vm=True)
+method("Str", "lines", "(Str) -> List[Str]", _by_input(str.splitlines), needs_vm=True)
+method("Str", "chars", "(Str) -> List[Str]", _by_input(list, factor=2), needs_vm=True)
+method("Str", "repeat", "(Str, Int) -> Str", _repeat, needs_vm=True)
+method("Str", "to_int", "(Str) -> Option[Int]", _by_input(_str_to_int), needs_vm=True)
+method("Str", "to_float", "(Str) -> Option[Float]", _by_input(_str_to_float), needs_vm=True)
+method("Str", "slice", "(Str, Int, Int) -> Str", _str_slice, needs_vm=True)
 method("Str", "char_at", "(Str, Int) -> Option[Str]", _char_at)
-method("Str", "index_of", "(Str, Str) -> Option[Int]", _index_of)
+method("Str", "index_of", "(Str, Str) -> Option[Int]", _by_input(_index_of), needs_vm=True)
 method("Str", "code", "(Str) -> Int", _code)
 method("Str", "to_str", "(Str) -> Str", lambda s: s)
 
@@ -277,9 +312,10 @@ def _get(xs: list[Any], i: int) -> Any:
     return some(xs[i]) if 0 <= i < len(xs) else NONE
 
 
-def _list_slice(xs: list[Any], a: int, b: int) -> list[Any]:
+def _list_slice(vm: Any, xs: list[Any], a: int, b: int) -> list[Any]:
     if a < 0 or b > len(xs) or a > b:
         raise VexPanic(f"slice {a}..{b} out of range for list of length {len(xs)}")
+    vm.charge(b - a)
     return xs[a:b]
 
 
@@ -309,19 +345,59 @@ def _fold(vm: Any, xs: list[Any], init: Any, f: Any) -> Any:
     return acc
 
 
-def _index_of_list(xs: list[Any], x: Any) -> Any:
+def _index_of_list(vm: Any, xs: list[Any], x: Any) -> Any:
+    vm.charge(len(xs))
     for i, y in enumerate(xs):
-        if y == x:
+        if vm.equal(y, x):
             return some(i)
     return NONE
+
+
+def _contains(vm: Any, xs: list[Any], x: Any) -> bool:
+    vm.charge(len(xs))
+    if type(x) in (int, float, bool):
+        return x in xs
+    return any(y is x or vm.equal(y, x) for y in xs)
+
+
+def _sort_cost(vm: Any, xs: list[Any]) -> None:
+    n = len(xs)
+    vm.charge(n)
+    levels = n.bit_length()
+    if xs and type(xs[0]) not in (int, float, bool):
+        vm.charge(charge_size(xs, vm.charge) * levels)
+    else:
+        vm.charge(n * levels)
+
+
+def _sort(vm: Any, xs: list[Any]) -> None:
+    _sort_cost(vm, xs)
+    xs.sort()
+
+
+def _sorted(vm: Any, xs: list[Any]) -> list[Any]:
+    _sort_cost(vm, xs)
+    return sorted(xs)
 
 
 def _sum(xs: list[int]) -> int:
     return checked(sum(xs), "sum")
 
 
-def _join(xs: list[str], sep: str) -> str:
+def _join(vm: Any, xs: list[str], sep: str) -> str:
+    vm.charge(len(xs))
+    vm.charge(sum(map(len, xs)) + len(sep) * len(xs))
     return sep.join(xs)
+
+
+def _extend(vm: Any, xs: list[Any], ys: list[Any]) -> None:
+    vm.charge(len(ys))
+    xs.extend(ys)
+
+
+def _range_to_list(vm: Any, r: range) -> list[int]:
+    vm.charge(max(0, r.stop - r.start))
+    return list(r)
 
 
 def _first(xs: list[Any]) -> Any:
@@ -333,7 +409,7 @@ def _last(xs: list[Any]) -> Any:
 
 
 def _for_each(vm: Any, xs: list[Any], f: Any) -> None:
-    for x in list(xs):
+    for x in _snapshot(vm, xs):
         vm.call(f, [x])
 
 
@@ -341,37 +417,37 @@ method("List", "len", "[T](List[T]) -> Int", len)
 method("List", "is_empty", "[T](List[T]) -> Bool", lambda xs: not xs)
 method("List", "push", "[T](List[T], T)", lambda xs, x: xs.append(x), mutates=True)
 method("List", "pop", "[T](List[T]) -> Option[T]", _pop, mutates=True)
-method("List", "insert", "[T](List[T], Int, T)", _insert, mutates=True)
-method("List", "remove_at", "[T](List[T], Int) -> T", _remove_at, mutates=True)
+method("List", "insert", "[T](List[T], Int, T)", _by_input(_insert), mutates=True, needs_vm=True)
+method("List", "remove_at", "[T](List[T], Int) -> T", _by_input(_remove_at), mutates=True, needs_vm=True)
 method("List", "clear", "[T](List[T])", lambda xs: xs.clear(), mutates=True)
-method("List", "extend", "[T](List[T], List[T])", lambda xs, ys: xs.extend(ys), mutates=True)
-method("List", "reverse", "[T](List[T])", lambda xs: xs.reverse(), mutates=True)
-method("List", "sort", "[T: Ord](List[T])", lambda xs: xs.sort(), mutates=True)
-method("List", "sorted", "[T: Ord](List[T]) -> List[T]", sorted)
+method("List", "extend", "[T](List[T], List[T])", _extend, mutates=True, needs_vm=True)
+method("List", "reverse", "[T](List[T])", _by_input(lambda xs: xs.reverse()), mutates=True, needs_vm=True)
+method("List", "sort", "[T: Ord](List[T])", _sort, mutates=True, needs_vm=True)
+method("List", "sorted", "[T: Ord](List[T]) -> List[T]", _sorted, needs_vm=True)
 method("List", "get", "[T](List[T], Int) -> Option[T]", _get)
 method("List", "first", "[T](List[T]) -> Option[T]", _first)
 method("List", "last", "[T](List[T]) -> Option[T]", _last)
-method("List", "contains", "[T: Eq](List[T], T) -> Bool", lambda xs, x: x in xs)
-method("List", "index_of", "[T: Eq](List[T], T) -> Option[Int]", _index_of_list)
-method("List", "slice", "[T](List[T], Int, Int) -> List[T]", _list_slice)
-method("List", "concat", "[T](List[T], List[T]) -> List[T]", lambda xs, ys: xs + ys)
-method("List", "copy", "[T](List[T]) -> List[T]", list)
+method("List", "contains", "[T: Eq](List[T], T) -> Bool", _contains, needs_vm=True)
+method("List", "index_of", "[T: Eq](List[T], T) -> Option[Int]", _index_of_list, needs_vm=True)
+method("List", "slice", "[T](List[T], Int, Int) -> List[T]", _list_slice, needs_vm=True)
+method("List", "concat", "[T](List[T], List[T]) -> List[T]", _by_input(lambda xs, ys: xs + ys), needs_vm=True)
+method("List", "copy", "[T](List[T]) -> List[T]", _by_input(list), needs_vm=True)
 method("List", "map", "[T, U](List[T], fn(T) -> U) -> List[U]",
-       lambda vm, xs, f: [vm.call(f, [x]) for x in list(xs)], needs_vm=True)  # fmt: skip
+       lambda vm, xs, f: [vm.call(f, [x]) for x in _snapshot(vm, xs)], needs_vm=True)  # fmt: skip
 method("List", "filter", "[T](List[T], fn(T) -> Bool) -> List[T]",
-       lambda vm, xs, f: [x for x in list(xs) if vm.call(f, [x])], needs_vm=True)  # fmt: skip
+       lambda vm, xs, f: [x for x in _snapshot(vm, xs) if vm.call(f, [x])], needs_vm=True)  # fmt: skip
 method("List", "fold", "[T, U](List[T], U, fn(U, T) -> U) -> U", _fold, needs_vm=True)
 method("List", "any", "[T](List[T], fn(T) -> Bool) -> Bool",
-       lambda vm, xs, f: any(vm.call(f, [x]) for x in list(xs)), needs_vm=True)  # fmt: skip
+       lambda vm, xs, f: any(vm.call(f, [x]) for x in _snapshot(vm, xs)), needs_vm=True)  # fmt: skip
 method("List", "all", "[T](List[T], fn(T) -> Bool) -> Bool",
-       lambda vm, xs, f: all(vm.call(f, [x]) for x in list(xs)), needs_vm=True)  # fmt: skip
+       lambda vm, xs, f: all(vm.call(f, [x]) for x in _snapshot(vm, xs)), needs_vm=True)  # fmt: skip
 method("List", "find", "[T](List[T], fn(T) -> Bool) -> Option[T]", _find, needs_vm=True)
 method("List", "for_each", "[T](List[T], fn(T) -> Unit)", _for_each, needs_vm=True)
-method("List", "enumerate", "[T](List[T]) -> List[(Int, T)]", lambda xs: list(enumerate(xs)))
-method("List", "zip", "[T, U](List[T], List[U]) -> List[(T, U)]", lambda xs, ys: list(zip(xs, ys)))
-method("List", "sum", "(List[Int]) -> Int", _sum)
-method("List", "sum_float", "(List[Float]) -> Float", lambda xs: math.fsum(xs))
-method("List", "join", "(List[Str], Str) -> Str", _join)
+method("List", "enumerate", "[T](List[T]) -> List[(Int, T)]", _by_input(lambda xs: list(enumerate(xs)), factor=3), needs_vm=True)
+method("List", "zip", "[T, U](List[T], List[U]) -> List[(T, U)]", _by_input(lambda xs, ys: list(zip(xs, ys)), factor=3), needs_vm=True)
+method("List", "sum", "(List[Int]) -> Int", _by_input(_sum), needs_vm=True)
+method("List", "sum_float", "(List[Float]) -> Float", _by_input(lambda xs: math.fsum(xs)), needs_vm=True)
+method("List", "join", "(List[Str], Str) -> Str", _join, needs_vm=True)
 
 
 # ------------------------------------------------------------------ Map
@@ -385,14 +461,14 @@ def _map_remove(m: dict[Any, Any], k: Any) -> Any:
 
 method("Map", "len", "[K, V](Map[K, V]) -> Int", len)
 method("Map", "is_empty", "[K, V](Map[K, V]) -> Bool", lambda m: not m)
-method("Map", "get", "[K, V](Map[K, V], K) -> Option[V]", _map_get)
-method("Map", "insert", "[K, V](Map[K, V], K, V)", lambda m, k, v: m.__setitem__(k, v), mutates=True)
-method("Map", "remove", "[K, V](Map[K, V], K) -> Option[V]", _map_remove, mutates=True)
+method("Map", "get", "[K, V](Map[K, V], K) -> Option[V]", _by_key(_map_get), needs_vm=True)
+method("Map", "insert", "[K, V](Map[K, V], K, V)", _by_key(lambda m, k, v: m.__setitem__(k, v)), mutates=True, needs_vm=True)
+method("Map", "remove", "[K, V](Map[K, V], K) -> Option[V]", _by_key(_map_remove), mutates=True, needs_vm=True)
 method("Map", "clear", "[K, V](Map[K, V])", lambda m: m.clear(), mutates=True)
-method("Map", "contains_key", "[K, V](Map[K, V], K) -> Bool", lambda m, k: k in m)
-method("Map", "keys", "[K, V](Map[K, V]) -> List[K]", lambda m: list(m.keys()))
-method("Map", "values", "[K, V](Map[K, V]) -> List[V]", lambda m: list(m.values()))
-method("Map", "entries", "[K, V](Map[K, V]) -> List[(K, V)]", lambda m: list(m.items()))
+method("Map", "contains_key", "[K, V](Map[K, V], K) -> Bool", _by_key(lambda m, k: k in m), needs_vm=True)
+method("Map", "keys", "[K, V](Map[K, V]) -> List[K]", _by_input(lambda m: list(m.keys())), needs_vm=True)
+method("Map", "values", "[K, V](Map[K, V]) -> List[V]", _by_input(lambda m: list(m.values())), needs_vm=True)
+method("Map", "entries", "[K, V](Map[K, V]) -> List[(K, V)]", _by_input(lambda m: list(m.items()), factor=3), needs_vm=True)
 
 
 # ------------------------------------------------------------------ Option / Result
@@ -408,21 +484,21 @@ def _expect_opt(o: Any, msg: str) -> Any:
     return o.f[0]
 
 
-def _unwrap_res(r: Any) -> Any:
+def _unwrap_res(vm: Any, r: Any) -> Any:
     if r.tag == 1:
-        raise VexPanic(f"called `unwrap()` on an `Err` value: {display(r.f[0], False)}")
+        raise VexPanic(f"called `unwrap()` on an `Err` value: {display(r.f[0], False, vm.charge)}")
     return r.f[0]
 
 
-def _expect_res(r: Any, msg: str) -> Any:
+def _expect_res(vm: Any, r: Any, msg: str) -> Any:
     if r.tag == 1:
-        raise VexPanic(f"{msg}: {display(r.f[0], False)}")
+        raise VexPanic(f"{msg}: {display(r.f[0], False, vm.charge)}")
     return r.f[0]
 
 
-def _unwrap_err(r: Any) -> Any:
+def _unwrap_err(vm: Any, r: Any) -> Any:
     if r.tag == 0:
-        raise VexPanic(f"called `unwrap_err()` on an `Ok` value: {display(r.f[0], False)}")
+        raise VexPanic(f"called `unwrap_err()` on an `Ok` value: {display(r.f[0], False, vm.charge)}")
     return r.f[0]
 
 
@@ -439,9 +515,9 @@ method("Option", "ok_or", "[T, E](Option[T], E) -> Result[T, E]",
        lambda o, e: err(e) if o.tag == 1 else ok(o.f[0]))  # fmt: skip
 method("Result", "is_ok", "[T, E](Result[T, E]) -> Bool", lambda r: r.tag == 0)
 method("Result", "is_err", "[T, E](Result[T, E]) -> Bool", lambda r: r.tag == 1)
-method("Result", "unwrap", "[T, E](Result[T, E]) -> T", _unwrap_res)
-method("Result", "expect", "[T, E](Result[T, E], Str) -> T", _expect_res)
-method("Result", "unwrap_err", "[T, E](Result[T, E]) -> E", _unwrap_err)
+method("Result", "unwrap", "[T, E](Result[T, E]) -> T", _unwrap_res, needs_vm=True)
+method("Result", "expect", "[T, E](Result[T, E], Str) -> T", _expect_res, needs_vm=True)
+method("Result", "unwrap_err", "[T, E](Result[T, E]) -> E", _unwrap_err, needs_vm=True)
 method("Result", "unwrap_or", "[T, E](Result[T, E], T) -> T", lambda r, d: d if r.tag == 1 else r.f[0])
 method("Result", "ok", "[T, E](Result[T, E]) -> Option[T]", lambda r: NONE if r.tag == 1 else some(r.f[0]))
 method("Result", "map", "[T, E, U](Result[T, E], fn(T) -> U) -> Result[U, E]",
@@ -452,7 +528,7 @@ method("Result", "and_then", "[T, E, U](Result[T, E], fn(T) -> Result[U, E]) -> 
        lambda vm, r, f: r if r.tag == 1 else vm.call(f, [r.f[0]]), needs_vm=True)  # fmt: skip
 
 # ------------------------------------------------------------------ Range
-method("Range", "to_list", "(Range) -> List[Int]", list)
+method("Range", "to_list", "(Range) -> List[Int]", _range_to_list, needs_vm=True)
 method("Range", "len", "(Range) -> Int", len)
 method("Range", "contains", "(Range, Int) -> Bool", lambda r, x: x in r)
 
@@ -504,15 +580,27 @@ ns("math", "gcd", "(Int, Int) -> Int", _gcd)
 ns("math", "hypot", "(Float, Float) -> Float", math.hypot)
 
 
-def _read_file(path: str) -> Any:
+# Input of unknown size is read and charged in pieces of this many characters.
+_IO_CHUNK = 65_536
+
+
+def _read_file(vm: Any, path: str) -> Any:
+    vm.charge(len(path))
     try:
         with open(path, encoding="utf-8") as fh:
-            return ok(fh.read())
+            parts: list[str] = []
+            while True:
+                part = fh.read(_IO_CHUNK)
+                vm.charge(len(part))
+                parts.append(part)
+                if len(part) < _IO_CHUNK:
+                    return ok("".join(parts))
     except (OSError, UnicodeDecodeError) as e:
         return err(f"{path}: {e.strerror if isinstance(e, OSError) and e.strerror else e}")
 
 
-def _write_file(path: str, text: str) -> Any:
+def _write_file(vm: Any, path: str, text: str) -> Any:
+    vm.charge(len(path) + len(text))
     try:
         with open(path, "w", encoding="utf-8", newline="") as fh:
             fh.write(text)
@@ -521,8 +609,15 @@ def _write_file(path: str, text: str) -> Any:
         return err(f"{path}: {e.strerror or e}")
 
 
-def _read_line() -> Any:
-    line = sys.stdin.readline()
+def _read_line(vm: Any) -> Any:
+    parts: list[str] = []
+    while True:
+        part = sys.stdin.readline(_IO_CHUNK)
+        vm.charge(len(part))
+        parts.append(part)
+        if len(part) < _IO_CHUNK or part.endswith("\n"):
+            break
+    line = "".join(parts)
     return NONE if line == "" else some(line.rstrip("\r\n"))
 
 
@@ -531,12 +626,15 @@ def _env_get(name: str) -> Any:
     return NONE if v is None else some(v)
 
 
-ns("io", "read_file", "(Str) -> Result[Str, Str]", _read_file)
-ns("io", "write_file", "(Str, Str) -> Result[Unit, Str]", _write_file)
-ns("io", "read_line", "() -> Option[Str]", _read_line)
-ns("env", "get", "(Str) -> Option[Str]", _env_get)
+ns("io", "read_file", "(Str) -> Result[Str, Str]", _read_file, needs_vm=True)
+ns("io", "write_file", "(Str, Str) -> Result[Unit, Str]", _write_file, needs_vm=True)
+ns("io", "read_line", "() -> Option[Str]", _read_line, needs_vm=True)
+ns("env", "get", "(Str) -> Option[Str]", _by_input(_env_get), needs_vm=True)
 # env.args needs the VM (program arguments), registered with needs_vm below.
 _reg(NAMESPACES["env"], "env.args", "args", "() -> List[Str]", lambda vm: list(vm.args), needs_vm=True)
 
 # Which Vex type constructor names own which method tables.
 METHOD_HEADS = {"Int", "Float", "Bool", "Str", "List", "Map", "Option", "Result", "Range"}
+
+# The scope seen by programs that are not embedded: everything.
+FULL_SCOPE = Scope(GLOBALS, NAMESPACES)
