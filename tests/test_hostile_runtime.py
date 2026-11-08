@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import os
+import random
 import subprocess
 import sys
 import threading
@@ -740,3 +741,102 @@ def test_repl_releases_its_stack_before_reporting_out_of_memory(monkeypatch: pyt
     with pytest.raises(VexError):
         repl.Session(io.StringIO()).eval("1")
     assert released == [True]
+
+
+# ---------------------------------------------------------------- the caps hold for every builtin that builds a List or Str
+SIX = "[1, 2, 3, 4, 5, 6]"
+
+
+@pytest.mark.usefixtures("small_limits")
+@pytest.mark.parametrize(
+    "call",
+    [
+        f"{SIX}.copy()",
+        f"{SIX}.map(|x| x)",
+        f"{SIX}.filter(|x| true)",
+        f"{SIX}.sorted()",
+        f"{SIX}.slice(0, 6)",
+        f"{SIX}.enumerate()",
+        f"{SIX}.zip({SIX})",
+        '#{1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6}.keys()',
+        '#{1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6}.values()',
+        '#{1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6}.entries()',
+        r'"\n\n\n\n\n\n".lines()',
+        r'"a\nb\nc\nd\ne\nf".lines()',
+        r'"a\r\nb\u{2028}c\u{85}d\u{C}e\u{1C}f".lines()',
+    ],
+    ids=["copy", "map", "filter", "sorted", "slice", "enumerate", "zip", "keys", "values", "entries",
+         "lines-empty", "lines-text", "lines-every-break"],
+)  # fmt: skip
+def test_every_list_builder_enforces_the_cap(call: str) -> None:
+    panics(f"let r = {call};", "list too large")
+
+
+@pytest.mark.usefixtures("small_limits")
+@pytest.mark.parametrize(
+    ("call", "expected"),
+    [
+        ("[1, 2, 3, 4, 5].copy().len()", "5"),
+        ("[1, 2, 3, 4, 5, 6].filter(|x| x > 3).len()".replace("[1, 2, 3, 4, 5, 6]", "[1, 2, 3, 4, 5]"), "2"),
+        (f"{SIX}.slice(1, 6).len()", "5"),
+        (f"{SIX}.zip([1, 2]).len()", "2"),
+        (r'"\n\n\n\n\n".lines().len()', "5"),
+        (r'"a\nb\nc\nd\ne\n".lines().len()', "5"),
+        (r'"a\nb\nc\nd\ne".lines().len()', "5"),
+        (r'"\r\n\r\n\r\n\r\n\r\n\r\n".len()', "12"),
+    ],
+)
+def test_list_cap_allows_exactly_the_limit(call: str, expected: str) -> None:
+    assert run_body(f"print({call});") == expected + "\n"
+
+
+@pytest.mark.usefixtures("small_limits")
+def test_windows_line_endings_count_once_against_the_cap() -> None:
+    assert run_body(r'print("\r\n\r\n\r\n\r\n\r\n".lines().len());') == "5\n"
+
+
+def test_counting_lines_stops_at_the_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(runtime, "MAX_LIST_LEN", 1000)
+    panics(r'print("\n".repeat(1001).lines().len());', "list too large")
+    assert run_body(r'print("\n".repeat(1000).lines().len());') == "1000\n"
+    assert run_body(r'print("a".repeat(5000).lines().len());') == "1\n"
+
+
+@pytest.mark.parametrize("seed", range(200))
+def test_line_break_count_agrees_with_splitlines(seed: int) -> None:
+    rng = random.Random(f"lines/{seed}")
+    text = "".join(rng.choice(["a", "\r\n", "\n", "\r", "\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", " ", " ", "\t", " "])
+                   for _ in range(rng.randint(1, 30)))  # fmt: skip
+    breaks = sum(1 for _ in stdlib._LINE_BREAK.finditer(text))
+    assert (breaks if text[-1] in stdlib._LINE_BREAK_CHARS else breaks + 1) == len(text.splitlines())
+
+
+@pytest.mark.usefixtures("small_limits")
+@pytest.mark.parametrize(
+    "call", ['"ßßßßßß".upper()', '"İİİİİİ".lower()'], ids=["upper", "lower"]
+)
+def test_case_conversion_that_grows_enforces_the_cap(call: str) -> None:
+    panics(f"let r = {call};", "string too large")
+
+
+@pytest.mark.usefixtures("small_limits")
+@pytest.mark.parametrize(
+    ("call", "expected"), [('"ßßßßß".upper()', "SSSSSSSSSS"), ('"abcdefghij".upper()', "ABCDEFGHIJ"), ('"ABCDEFGHIJ".lower()', "abcdefghij")]
+)
+def test_case_conversion_allows_exactly_the_limit(call: str, expected: str) -> None:
+    assert run_body(f"print({call});") == expected + "\n"
+
+
+@pytest.mark.usefixtures("small_limits")
+def test_program_arguments_over_the_cap_are_a_located_error() -> None:
+    with pytest.raises(VexRuntimeError) as info:
+        run_with_args("print(env.args().len());", ["a"] * 6)
+    assert "list too large" in info.value.message and info.value.trace[0][1] is not None
+    assert run_with_args("print(env.args().len());", ["a"] * 5) == "5\n"
+
+
+@pytest.mark.usefixtures("small_limits")
+def test_environment_value_over_the_cap_is_a_located_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(os, "environ", {"VEX_LONG": "x" * 11, "VEX_FITS": "x" * 10})
+    panics('print(env.get("VEX_LONG").is_some());', "string too large")
+    assert run_body('print(env.get("VEX_FITS").unwrap().len());') == "10\n"

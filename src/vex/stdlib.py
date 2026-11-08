@@ -7,6 +7,7 @@ import os
 import re
 import sys
 from collections.abc import Callable
+from itertools import islice
 from typing import Any
 
 from vex import runtime
@@ -250,6 +251,30 @@ def _repeat(s: str, n: int) -> str:
     return s * n
 
 
+def _upper(s: str) -> str:
+    result = s.upper()  # at most three characters per character, so this allocation is itself bounded
+    _check_str(len(result))
+    return result
+
+
+def _lower(s: str) -> str:
+    result = s.lower()
+    _check_str(len(result))
+    return result
+
+
+_LINE_BREAK = re.compile("\r\n|[\n\r\v\f\x1c\x1d\x1e\x85  ]")  # exactly what str.splitlines breaks on
+_LINE_BREAK_CHARS = "\n\r\v\f\x1c\x1d\x1e\x85  "
+
+
+def _lines(s: str) -> list[str]:
+    limit = runtime.MAX_LIST_LEN
+    if len(s) > limit:  # a shorter string cannot hold too many lines, so only this one is worth counting
+        breaks = sum(1 for _ in islice(_LINE_BREAK.finditer(s), limit + 1))
+        _check_list(breaks if s[-1] in _LINE_BREAK_CHARS else breaks + 1)
+    return s.splitlines()
+
+
 def _chars(s: str) -> list[str]:
     _check_list(len(s))
     return list(s)
@@ -279,15 +304,15 @@ def _code(s: str) -> int:
 
 method("Str", "len", "(Str) -> Int", len)
 method("Str", "is_empty", "(Str) -> Bool", lambda s: not s)
-method("Str", "upper", "(Str) -> Str", str.upper)
-method("Str", "lower", "(Str) -> Str", str.lower)
+method("Str", "upper", "(Str) -> Str", _upper)
+method("Str", "lower", "(Str) -> Str", _lower)
 method("Str", "trim", "(Str) -> Str", str.strip)
 method("Str", "contains", "(Str, Str) -> Bool", lambda s, t: t in s)
 method("Str", "starts_with", "(Str, Str) -> Bool", str.startswith)
 method("Str", "ends_with", "(Str, Str) -> Bool", str.endswith)
 method("Str", "replace", "(Str, Str, Str) -> Str", _replace)
 method("Str", "split", "(Str, Str) -> List[Str]", _split)
-method("Str", "lines", "(Str) -> List[Str]", str.splitlines)
+method("Str", "lines", "(Str) -> List[Str]", _lines)
 method("Str", "chars", "(Str) -> List[Str]", _chars)
 method("Str", "repeat", "(Str, Int) -> Str", _repeat)
 method("Str", "to_int", "(Str) -> Option[Int]", _str_to_int)
@@ -311,6 +336,7 @@ def _get(xs: list[Any], i: int) -> Any:
 def _list_slice(xs: list[Any], a: int, b: int) -> list[Any]:
     if a < 0 or b > len(xs) or a > b:
         raise VexPanic(f"slice {a}..{b} out of range for list of length {len(xs)}")
+    _check_list(b - a)
     return xs[a:b]
 
 
@@ -378,10 +404,25 @@ def _sort(xs: list[Any]) -> None:
         xs.sort()
 
 
+def _copy(xs: list[Any]) -> list[Any]:
+    _check_list(len(xs))  # a list grown by `push` can be longer than one operation may build
+    return list(xs)
+
+
 def _sorted(xs: list[Any]) -> list[Any]:
-    result = list(xs)
+    result = _copy(xs)
     _sort(result)
     return result
+
+
+def _enumerate(xs: list[Any]) -> list[tuple[int, Any]]:
+    _check_list(len(xs))
+    return list(enumerate(xs))
+
+
+def _zip(xs: list[Any], ys: list[Any]) -> list[tuple[Any, Any]]:
+    _check_list(min(len(xs), len(ys)))
+    return list(zip(xs, ys))
 
 
 def _first(xs: list[Any]) -> Any:
@@ -415,11 +456,11 @@ method("List", "contains", "[T: Eq](List[T], T) -> Bool", lambda xs, x: x in xs)
 method("List", "index_of", "[T: Eq](List[T], T) -> Option[Int]", _index_of_list)
 method("List", "slice", "[T](List[T], Int, Int) -> List[T]", _list_slice)
 method("List", "concat", "[T](List[T], List[T]) -> List[T]", _concat)
-method("List", "copy", "[T](List[T]) -> List[T]", list)
+method("List", "copy", "[T](List[T]) -> List[T]", _copy)
 method("List", "map", "[T, U](List[T], fn(T) -> U) -> List[U]",
-       lambda vm, xs, f: [vm.call(f, [x]) for x in list(xs)], needs_vm=True)  # fmt: skip
+       lambda vm, xs, f: [vm.call(f, [x]) for x in _copy(xs)], needs_vm=True)  # fmt: skip
 method("List", "filter", "[T](List[T], fn(T) -> Bool) -> List[T]",
-       lambda vm, xs, f: [x for x in list(xs) if vm.call(f, [x])], needs_vm=True)  # fmt: skip
+       lambda vm, xs, f: [x for x in _copy(xs) if vm.call(f, [x])], needs_vm=True)  # fmt: skip
 method("List", "fold", "[T, U](List[T], U, fn(U, T) -> U) -> U", _fold, needs_vm=True)
 method("List", "any", "[T](List[T], fn(T) -> Bool) -> Bool",
        lambda vm, xs, f: any(vm.call(f, [x]) for x in list(xs)), needs_vm=True)  # fmt: skip
@@ -427,8 +468,8 @@ method("List", "all", "[T](List[T], fn(T) -> Bool) -> Bool",
        lambda vm, xs, f: all(vm.call(f, [x]) for x in list(xs)), needs_vm=True)  # fmt: skip
 method("List", "find", "[T](List[T], fn(T) -> Bool) -> Option[T]", _find, needs_vm=True)
 method("List", "for_each", "[T](List[T], fn(T) -> Unit)", _for_each, needs_vm=True)
-method("List", "enumerate", "[T](List[T]) -> List[(Int, T)]", lambda xs: list(enumerate(xs)))
-method("List", "zip", "[T, U](List[T], List[U]) -> List[(T, U)]", lambda xs, ys: list(zip(xs, ys)))
+method("List", "enumerate", "[T](List[T]) -> List[(Int, T)]", _enumerate)
+method("List", "zip", "[T, U](List[T], List[U]) -> List[(T, U)]", _zip)
 method("List", "sum", "(List[Int]) -> Int", _sum)
 method("List", "sum_float", "(List[Float]) -> Float", _sum_float)
 method("List", "join", "(List[Str], Str) -> Str", _join)
@@ -443,6 +484,21 @@ def _map_remove(m: dict[Any, Any], k: Any) -> Any:
     return some(m.pop(k)) if k in m else NONE
 
 
+def _map_keys(m: dict[Any, Any]) -> list[Any]:
+    _check_list(len(m))
+    return list(m.keys())
+
+
+def _map_values(m: dict[Any, Any]) -> list[Any]:
+    _check_list(len(m))
+    return list(m.values())
+
+
+def _map_entries(m: dict[Any, Any]) -> list[tuple[Any, Any]]:
+    _check_list(len(m))
+    return list(m.items())
+
+
 method("Map", "len", "[K, V](Map[K, V]) -> Int", len)
 method("Map", "is_empty", "[K, V](Map[K, V]) -> Bool", lambda m: not m)
 method("Map", "get", "[K, V](Map[K, V], K) -> Option[V]", _map_get)
@@ -450,9 +506,9 @@ method("Map", "insert", "[K, V](Map[K, V], K, V)", lambda m, k, v: m.__setitem__
 method("Map", "remove", "[K, V](Map[K, V], K) -> Option[V]", _map_remove, mutates=True)
 method("Map", "clear", "[K, V](Map[K, V])", lambda m: m.clear(), mutates=True)
 method("Map", "contains_key", "[K, V](Map[K, V], K) -> Bool", lambda m, k: k in m)
-method("Map", "keys", "[K, V](Map[K, V]) -> List[K]", lambda m: list(m.keys()))
-method("Map", "values", "[K, V](Map[K, V]) -> List[V]", lambda m: list(m.values()))
-method("Map", "entries", "[K, V](Map[K, V]) -> List[(K, V)]", lambda m: list(m.items()))
+method("Map", "keys", "[K, V](Map[K, V]) -> List[K]", _map_keys)
+method("Map", "values", "[K, V](Map[K, V]) -> List[V]", _map_values)
+method("Map", "entries", "[K, V](Map[K, V]) -> List[(K, V)]", _map_entries)
 
 
 # ------------------------------------------------------------------ Option / Result
@@ -622,10 +678,14 @@ def _require_unicode(text: str, what: str) -> str:
 
 def _env_get(name: str) -> Any:
     v = os.environ.get(name)
-    return NONE if v is None else some(_require_unicode(v, f"environment variable {name}"))
+    if v is None:
+        return NONE
+    _check_str(len(v))
+    return some(_require_unicode(v, f"environment variable {name}"))
 
 
 def _env_args(vm: Any) -> list[str]:
+    _check_list(len(vm.args))
     return [_require_unicode(a, f"program argument {i}") for i, a in enumerate(vm.args)]
 
 
