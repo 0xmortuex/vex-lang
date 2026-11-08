@@ -1,0 +1,13 @@
+good.conf: valid, 4 keys
+  host = Word("db.internal")
+  port = Number(5432)
+  tls = Switch(true)
+  log = Word("info")
+bad.conf: 7 problems
+  line 1: port: port 99999 is outside 1..65535
+  line 2: tls: `maybe` is not a boolean
+  line 3: unknown key `colour`
+  line 4: log: `trace` is not one of debug, info, error
+  line 5: `log` is set twice
+  line 6: expected `key = value`
+  missing required key `host`

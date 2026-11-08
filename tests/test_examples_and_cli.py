@@ -5,11 +5,14 @@ from __future__ import annotations
 import pathlib
 import subprocess
 import sys
+from typing import Any
 
 import pytest
+from test_embed_demo import load_runner
 
-from vex.api import compile_file, read_source
-from vex.diagnostics import VexError
+from vex.api import compile_file, compile_text, read_source
+from vex.diagnostics import VexError, VexRuntimeError
+from vex.host import Host, VexBudgetError
 
 ROOT = pathlib.Path(__file__).parent.parent
 EXAMPLES = sorted((ROOT / "examples").glob("*.vx"))
@@ -29,7 +32,79 @@ def vex(*args: str, stdin: str | None = None) -> subprocess.CompletedProcess[str
 
 
 def test_there_are_examples() -> None:
-    assert len(EXAMPLES) >= 8
+    assert len(EXAMPLES) >= 13
+
+
+def embed_rule_scripts() -> set[pathlib.Path]:
+    return {ROOT / "examples" / "embed" / rule for rule in load_runner().RULES}
+
+
+def test_every_example_is_run_by_the_suite() -> None:
+    """Each .vx below examples/ is a golden-tested program or a rule script listed for the embedding demo."""
+    on_disk = set((ROOT / "examples").rglob("*.vx"))
+    assert on_disk - embed_rule_scripts() == set(EXAMPLES)
+    assert embed_rule_scripts() <= on_disk
+
+
+def test_every_golden_file_belongs_to_an_example_and_asserts_something() -> None:
+    goldens = set((ROOT / "examples").glob("*.out"))
+    assert goldens == {p.with_suffix(".out") for p in EXAMPLES}
+    for golden in goldens:
+        assert golden.read_text(encoding="utf-8").strip(), f"{golden.name} is empty"
+
+
+def test_state_machine_cannot_forget_a_transition() -> None:
+    path = ROOT / "examples" / "state_machine.vx"
+    arm = "        (State.Closed(_), Event.Reopen) => Ok(State.Open),\n"
+    text = path.read_text(encoding="utf-8")
+    assert arm in text
+    with pytest.raises(VexError) as e:
+        compile_text(text.replace(arm, ""), "state_machine.vx")
+    assert [d.code for d in e.value.diagnostics] == ["non-exhaustive-match"]
+
+
+def rule_host(rule: str) -> Host:
+    tiers = {"C-100": "gold", "C-200": "silver", "C-300": "bronze"}
+    h = Host()
+    h.budget(100_000)
+    h.bind("tax_cents", "(Int) -> Int", lambda amount: amount * 8 // 100)
+    h.bind("customer_tier", "(Str) -> Str", lambda who: tiers[who] if who in tiers else h.fail("no such customer"))
+    h.load(rule, (ROOT / "examples" / "embed" / "rules" / rule).read_text(encoding="utf-8"))
+    return h
+
+
+@pytest.mark.parametrize(
+    ("rule", "expected"),
+    [
+        ("1_standard.vx", [3645, 10250, 486000, 2430000000]),
+        ("2_holiday.vx", [2700, 7552, 388800, 2159998110]),
+        ("3_overflow.vx", [7800, 20779, 936000]),
+    ],
+)
+def test_embed_rule_prices_orders_from_a_python_host(rule: str, expected: list[int]) -> None:
+    """The prices in examples/embed/expected.out, reached without a Mort toolchain."""
+    orders: list[list[Any]] = [
+        [3, 1250, "C-100"],
+        [10, 999, "C-200"],
+        [1, 450000, "C-300"],
+        [2000000, 1250, "C-100"],
+        [1, 100, "C-404"],
+    ]
+    h = rule_host(rule)
+    assert [h.call("price", order) for order in orders[: len(expected)]] == expected
+    with pytest.raises(VexRuntimeError):  # 3_overflow fails on the large order, the others on the unknown customer
+        h.call("price", orders[len(expected)])
+
+
+def test_embed_rule_that_never_finishes_is_stopped_by_the_budget() -> None:
+    with pytest.raises(VexBudgetError):
+        rule_host("4_runaway.vx").call("price", [3, 1250, "C-100"])
+
+
+def test_embed_rule_without_a_capability_does_not_load() -> None:
+    with pytest.raises(VexError) as e:
+        rule_host("4_forbidden.vx")
+    assert [d.code for d in e.value.diagnostics] == ["capability-denied"]
 
 
 @pytest.mark.parametrize("path", EXAMPLES, ids=lambda p: p.stem)

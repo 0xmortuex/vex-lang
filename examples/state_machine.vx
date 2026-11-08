@@ -1,0 +1,58 @@
+// A state machine: the lifecycle of a support ticket. The transition function matches on
+// (state, event), so the compiler refuses to build it if any combination is forgotten.
+
+enum State {
+    Open,
+    Assigned(Str),
+    Waiting(Str, Int),
+    Closed(Str),
+}
+
+enum Event {
+    Assign(Str),
+    AskCustomer,
+    CustomerReplied,
+    Tick,
+    Resolve,
+    Reopen,
+}
+
+fn step(state: State, event: Event) -> Result[State, Str] {
+    match (state, event) {
+        (State.Open, Event.Assign(who)) => Ok(State.Assigned(who)),
+        (State.Assigned(_), Event.Assign(who)) => Ok(State.Assigned(who)),
+        (State.Assigned(who), Event.AskCustomer) => Ok(State.Waiting(who, 0)),
+        (State.Assigned(who), Event.Resolve) => Ok(State.Closed("resolved by {who}")),
+        (State.Waiting(who, _), Event.CustomerReplied) => Ok(State.Assigned(who)),
+        (State.Waiting(_, days), Event.Tick) if days >= 2 => Ok(State.Closed("no reply")),
+        (State.Waiting(who, days), Event.Tick) => Ok(State.Waiting(who, days + 1)),
+        (State.Closed(_), Event.Reopen) => Ok(State.Open),
+        (State.Open | State.Assigned(_) | State.Closed(_), Event.Tick) => Ok(state),
+        // Refusals are listed too. A catch-all here would hide any transition added later.
+        (State.Open, Event.AskCustomer | Event.CustomerReplied | Event.Resolve | Event.Reopen)
+        | (State.Assigned(_), Event.CustomerReplied | Event.Reopen)
+        | (State.Waiting(_, _), Event.Assign(_) | Event.AskCustomer | Event.Resolve | Event.Reopen)
+        | (State.Closed(_), Event.Assign(_) | Event.AskCustomer | Event.CustomerReplied | Event.Resolve)
+            => Err("cannot apply {event} in state {state}"),
+    }
+}
+
+fn run(name: Str, events: List[Event]) {
+    print("{name}:");
+    let mut state = State.Open;
+    for event in events {
+        match step(state, event) {
+            Ok(next) => {
+                print("  {event} -> {next}");
+                state = next;
+            }
+            Err(why) => print("  refused: {why}"),
+        }
+    }
+}
+
+fn main() {
+    run("happy path", [Event.Assign("ada"), Event.AskCustomer, Event.Tick, Event.CustomerReplied, Event.Resolve]);
+    run("timeout", [Event.Assign("alan"), Event.AskCustomer, Event.Tick, Event.Tick, Event.Tick, Event.Reopen]);
+    run("invalid", [Event.Resolve, Event.AskCustomer, Event.Assign("ada"), Event.Reopen]);
+}

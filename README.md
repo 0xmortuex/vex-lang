@@ -1,7 +1,9 @@
 # Vex
 
-**A friendly, statically typed language with type inference, enums with data, exhaustive
-pattern matching, and its own bytecode VM.** Written in pure Python with zero runtime dependencies.
+**A statically checked extension language that native programs embed.** Users change a program's rules,
+hooks and config logic without a compiler. A script can do only what its host grants, and it fails with a
+source-located error instead of taking the host down. Vex has type inference, enums with data, exhaustive
+pattern matching and its own bytecode VM, written in pure Python with zero runtime dependencies.
 
 ```vex
 enum Shape {
@@ -49,6 +51,25 @@ Vex is the kind of language you can hold in your head: `let` / `let mut`, functi
 explicit parameter types and inferred results, structs, generics, closures, `Option` / `Result`
 with `?`, and a `match` the compiler checks for you.
 
+## Quickstart (60 seconds)
+
+You need `git`, [uv](https://docs.astral.sh/uv/) and Python 3.10 or newer.
+
+```text
+git clone https://github.com/0xmortuex/vex-lang
+cd vex-lang
+uv run vex run examples/hello.vx
+uv run vex run examples/rules_engine.vx
+uv run vex check tests/errors/undefined_name.vx
+```
+
+The first `uv run` creates the environment. `hello.vx` greets you, `rules_engine.vx` prices four orders
+against a discount policy, and the last command shows a compile error, so it exits with status 1 on
+purpose. Then open `examples/rules_engine.vx`, change `Effect.PercentOff(10)` to `Effect.PercentOff(50)`, and
+run it again: there is no build step.
+
+Next, take the [language tour](docs/tour.md). It ends with [embedding Vex](docs/tour.md#embedding-vex) in a host program.
+
 ## Install
 
 ```text
@@ -56,8 +77,8 @@ uv tool install git+https://github.com/0xmortuex/vex-lang
 vex --version
 ```
 
-(Or `pip install git+https://github.com/0xmortuex/vex-lang`.) Python 3.10 or newer, no other
-dependencies. From a checkout: `uv sync`, then `uv run vex run examples/hello.vx`.
+Do not run `pip install vex-lang`: that name on PyPI belongs to an unrelated project. Vex is not published
+to PyPI yet, so install it from this repository.
 
 ## Use it
 
@@ -138,23 +159,26 @@ stack trace (most recent call first):
 
 ## Documentation
 
-- [Language tour](docs/tour.md): everything, with runnable snippets
+- [Language tour](docs/tour.md): everything, and a test runs every snippet
 - [Language specification](docs/spec.md): grammar, type rules, evaluation order, error semantics and limits, checked by the test suite
+- [Embedding and ABI](docs/ffi.md): host functions, capabilities, the budget, the native ABI
 - [Bytecode and VM](docs/vm.md): instruction set, frames, closures, runtime errors
-- [`examples/`](examples/): hello, fizzbuzz, fibonacci, linked list via enums, JSON-ish parser,
-  bank account with structs and `Result`, generic stack, BFS maze solver, minimax tic-tac-toe
+- [`examples/`](examples/): rules engine, config validator, text templating, CSV report, state machine,
+  JSON-ish parser, bank account, generic stack, linked list via enums, BFS maze solver, minimax tic-tac-toe,
+  hello, fizzbuzz, fibonacci, and a [Mort host](examples/embed/) with swappable Vex rules
+- [Contributing](CONTRIBUTING.md): setup, checks, fuzzing, adding a builtin
 - Want to build one yourself? [vex-lang-the-hard-way](https://github.com/0xmortuex/vex-lang-the-hard-way)
   builds a minimal Vex from scratch in ten runnable modules.
 
 ## Performance (honest numbers)
 
-The VM is an interpreter written in Python, so it is slow. `python benchmarks/run.py` on a Windows
-x86-64 machine with CPython 3.13:
+The VM is an interpreter written in Python, so it is slow. `uv run python benchmarks/run.py` on a Windows
+x86-64 machine with CPython 3.13.12, one run with other work on the machine, so read these as ratios:
 
 | benchmark | Vex VM | same algorithm in CPython | slowdown |
 |-----------|-------:|--------------------------:|---------:|
-| `fib(27)` (recursive, ~630k calls) | 0.76 s | 0.018 s | ~43x |
-| 1M-iteration `while` loop + 600k nested `for` | 2.8 s | 0.08 s | ~35x |
+| `fib(27)` (recursive, ~630k calls) | 1.45 s | 0.039 s | ~37x |
+| 1M-iteration `while` loop + 600k nested `for` | 3.89 s | 0.105 s | ~37x |
 
 Cheap optimisations that are in: calls go straight to the callee's code object, integer ops are
 specialised by static type, local-vs-constant arithmetic and comparisons are fused, and hot
@@ -178,8 +202,6 @@ instructions are dispatched first. Anything more would be a different VM.
   `{` in a string starts an interpolation; write `\{` for a literal brace.
 - **Type inference is local.** A method call needs the receiver's type to be known at that point
   (`|x| x.len()` fails until `x` has a type; annotate it).
-- **Very deep values**: comparing or printing a structure nested thousands of levels deep (a 5000-element
-  linked list) can hit Python's recursion limits on some Python versions; that is reported as a runtime error, not a crash.
 - **`stdin` / files**: only whole-file UTF-8 reads and writes, and line reads from stdin.
 - Debugging aids stop at stack traces: no debugger, no profiler, no source maps for the REPL beyond `<repl:N>`.
 
@@ -187,15 +209,15 @@ instructions are dispatched first. Anything more would be a different VM.
 
 ```text
 uv sync
-uv run pytest                 # about 1,800 tests
-uv run ruff check src tests
+uv run pytest -q              # 5,542 tests, 2,546 of them fuzz cases
+uv run ruff check src tests benchmarks
 uv run mypy --strict src tests
 uv run python benchmarks/run.py
 ```
 
 The type-error corpus lives in `tests/errors/`: each `.vx` file starts with
 `// expect: <code> <line>:<col> [| text that must appear in the output]` and the test checks the
-diagnostic code and exact position. See [CHANGELOG.md](CHANGELOG.md).
+diagnostic code and exact position. See [CONTRIBUTING.md](CONTRIBUTING.md) and [CHANGELOG.md](CHANGELOG.md).
 
 ## License
 
