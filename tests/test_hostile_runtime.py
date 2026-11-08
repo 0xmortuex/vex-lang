@@ -8,6 +8,7 @@ import subprocess
 import sys
 import threading
 import time
+import weakref
 from collections.abc import Iterator
 from typing import Any
 
@@ -15,6 +16,7 @@ import pytest
 from helpers import run_body, run_source
 
 from vex import api, cli, repl, runtime, stdlib
+from vex import vm as vm_module
 from vex.api import compile_text
 from vex.checker import Checker
 from vex.diagnostics import VexError, VexRuntimeError
@@ -629,3 +631,82 @@ def test_sorting_other_values_is_unchanged() -> None:
 
 def test_sorted_returns_a_new_list_of_units() -> None:
     assert run_body("let x = [()]; let mut y = x.sorted(); y.push(()); print(x.len());") == "1\n"
+
+
+# ---------------------------------------------------------------- reporting when memory has really run out
+# tools/oom_job.py measures these paths under a real memory limit; here MemoryError is injected.
+class Held:
+    """A runtime value that a weak reference can watch."""
+
+
+def test_program_values_are_released_before_the_error_is_built(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(stdlib.METHODS["Str"]["upper"], "impl", out_of_memory)
+    prog = compile_text('fn inner(y: Int) { "a".upper(); }\nfn outer(x: Int) { inner(x); }\nfn main() {}\n', "<t>")
+    code = prog.env.fns["outer"].code
+    assert code is not None
+    vm = VM(io.StringIO())
+    refs: list[weakref.ref[Held]] = []
+    released: list[bool] = []
+    real_error = VexRuntimeError
+
+    def held_arguments() -> list[Any]:
+        held = Held()
+        refs.append(weakref.ref(held))
+        return [held]
+
+    def spy(message: str, trace: Any = None) -> VexRuntimeError:
+        released.append(refs[0]() is None)
+        return real_error(message, trace)
+
+    monkeypatch.setattr(vm_module, "VexRuntimeError", spy)
+    with pytest.raises(real_error) as info:
+        vm.run_function(code, held_arguments())
+    assert released == [True]
+    assert [name for name, _ in info.value.trace] == ["inner", "outer"]
+
+
+def test_out_of_memory_is_reported_even_if_the_trace_cannot_be_built(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(stdlib.METHODS["Str"]["upper"], "impl", out_of_memory)
+    monkeypatch.setattr(VM, "make_trace", out_of_memory)
+    with pytest.raises(VexRuntimeError) as info:
+        run_body('"a".upper();')
+    assert info.value.message == "out of memory"
+
+
+def test_the_reserve_is_spent_by_a_failure_and_taken_again(monkeypatch: pytest.MonkeyPatch) -> None:
+    session = repl.Session(io.StringIO())
+    assert session.vm.reserve is not None
+    monkeypatch.setattr(stdlib.METHODS["Str"]["upper"], "impl", out_of_memory)
+    with pytest.raises(VexRuntimeError):
+        session.eval('"a".upper()')
+    assert session.vm.reserve is None
+    assert session.eval("1 + 1") == "2 : Int"
+    assert session.vm.reserve is not None
+
+
+def test_a_vm_that_cannot_retake_its_reserve_still_runs(monkeypatch: pytest.MonkeyPatch) -> None:
+    session = repl.Session(io.StringIO())
+    session.vm.reserve = None
+    monkeypatch.setattr(vm_module, "bytearray", out_of_memory, raising=False)
+    assert session.eval("1 + 1") == "2 : Int"
+    assert session.vm.reserve is None
+
+
+def test_global_values_survive_a_failure_in_the_repl(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(stdlib.METHODS["Str"]["upper"], "impl", out_of_memory)
+    session = repl.Session(io.StringIO())
+    session.eval("let keep = [1, 2];")
+    with pytest.raises(VexRuntimeError):
+        session.eval('"a".upper()')
+    assert session.eval("keep") == "[1, 2] : List[Int]"
+
+
+def test_out_of_memory_position_does_not_leak_into_the_next_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(stdlib.METHODS["Str"]["upper"], "impl", out_of_memory)
+    session = repl.Session(io.StringIO())
+    with pytest.raises(VexRuntimeError) as first:
+        session.eval('"a".upper()')
+    with pytest.raises(VexRuntimeError) as second:
+        session.eval('\n"b".upper()')
+    assert first.value.trace[0][1] is not None and first.value.trace[0][1].line == 1
+    assert second.value.trace[0][1] is not None and second.value.trace[0][1].line == 2

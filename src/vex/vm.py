@@ -94,6 +94,7 @@ MAX_DEPTH = 100_000
 _DONE = object()
 _TOO_DEEP = "recursion too deep (a deeply nested value, or calls nested through builtins such as `map`)"
 _OUT_OF_MEMORY = "out of memory"
+_RESERVE_BYTES = 1024 * 1024  # room for reporting out of memory when values that cannot be released fill the heap
 
 
 class VM:
@@ -102,6 +103,10 @@ class VM:
         self.args = args or []
         self.frames: list[tuple[Code, int, list[Any], list[Any]]] = []
         self.globals: dict[str, Any] = {}
+        self.reserve: bytearray | None = bytearray(_RESERVE_BYTES)
+        self._oom_code: Code | None = None  # the instruction that ran out of memory
+        self._oom_pc = 0
+        self._oom_error = VexRuntimeError(_OUT_OF_MEMORY)  # built now: the last resort needs no allocation
 
     # ------------------------------------------------------------ public API
     def call(self, f: Any, args: list[Any]) -> Any:
@@ -121,6 +126,13 @@ class VM:
         """Run a top-level function to completion, converting failures to VexRuntimeError."""
         args = args or []
         locals_ = list(args) + [None] * (code.nlocals - len(args))
+        args = None  # locals_ holds them now, and must be the only thing that does when memory runs out
+        self._oom_code = None
+        if self.reserve is None:
+            try:
+                self.reserve = bytearray(_RESERVE_BYTES)
+            except MemoryError:  # still full; the report falls back on the error built in __init__
+                pass
         try:
             return self.execute(code, locals_)
         except VexPanic as e:
@@ -130,9 +142,26 @@ class VM:
         except RecursionError:
             self.frames.clear()
             raise VexRuntimeError(_TOO_DEEP) from None
-        except MemoryError:
-            self.frames.clear()
-            raise VexRuntimeError(_OUT_OF_MEMORY) from None
+        except MemoryError as e:
+            e.__traceback__ = None  # its frames pin every Python local of the failed `execute` calls
+            locals_.clear()
+            raise self._report_out_of_memory() from None
+
+    def _report_out_of_memory(self) -> VexRuntimeError:
+        """Release the failed program's values, then describe where it failed. Runs with the heap full."""
+        frames = self.frames
+        for frame in frames:  # (code, pc, locals, stack); the trace only needs the first two
+            frame[2].clear()
+            frame[3].clear()
+        code, pc = self._oom_code, self._oom_pc
+        self._oom_code = None
+        try:
+            error = VexRuntimeError(_OUT_OF_MEMORY, self.make_trace(code, pc - 1, frames) if code is not None else [])
+        except MemoryError:  # values that cannot be released (REPL globals) still fill the heap
+            error = self._oom_error
+            error.__traceback__ = None
+        frames.clear()
+        return error
 
     def show_result(self, code: Code, value: Any) -> str:
         """Format the value of a finished REPL input; a failure is located at that input, as a panic would be."""
@@ -143,6 +172,7 @@ class VM:
         except RecursionError:
             message = _TOO_DEEP
         except MemoryError:
+            self.reserve = None
             message = _OUT_OF_MEMORY
         raise VexRuntimeError(message, [(code.name, _span_at(code, len(code.spans) - 1))])
 
@@ -508,14 +538,22 @@ class VM:
             if e.trace is None:
                 e.trace = self.make_trace(code, pc - 1, frames)
             raise
-        except (RecursionError, MemoryError) as e:
-            # The one deliberate last-resort boundary. These two are not hostile arguments to one builtin:
-            # any instruction can allocate, and comparing, printing or calling back can recurse, wherever
-            # the Python stack or the heap happens to run out. Catching them here is what locates them.
+        except RecursionError:
+            # One of the two deliberate last-resort boundaries. These are not hostile arguments to one builtin:
+            # comparing, printing or calling back can recurse, and any instruction can allocate, wherever the
+            # Python stack or the heap happens to run out. Catching them here is what locates them.
             # make_trace may hit the same limit; the next `execute` out, with more stack, then handles it.
-            panic = VexPanic(_TOO_DEEP if isinstance(e, RecursionError) else _OUT_OF_MEMORY)
+            panic = VexPanic(_TOO_DEEP)
             panic.trace = self.make_trace(code, pc - 1, frames)
             raise panic from None
+        except MemoryError:
+            # Nothing can be built yet: this activation's locals pin the program's values. Spend the reserve,
+            # note the innermost instruction (no allocation), and let run_function report once they are gone.
+            self.reserve = None
+            if self._oom_code is None:
+                self._oom_code = code
+                self._oom_pc = pc
+            raise
 
 
 def _span_at(code: Code, pc: int) -> Span | None:
