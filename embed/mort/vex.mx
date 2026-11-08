@@ -109,6 +109,8 @@ pub fn write_text(buffer: []u8, start: u64, text: *u8) -> u64 {
 // Lifecycle: 0 before start, 1 running, 2 stopped. CPython cannot be restarted, so `stopped` is final.
 let vex_state: i64 = 0;
 let vex_table: i64 = 0;
+// The number of `call`s currently running. Non-zero means a script, and the HostFn it reached, are on the stack.
+let vex_calls: i64 = 0;
 
 // Start CPython and fill a fresh table, once. Returns the same table on later calls. If attach failed, or the
 // runtime has been stopped, the returned table's `ready` is 0, and every wrapper below reports status 3.
@@ -139,8 +141,10 @@ pub fn start() -> *VexApi {
 
 // Shut CPython down. Close every instance first. Every table pointer dies with the interpreter, so `ready`
 // is cleared and the wrappers below report status 3 from here on. Returns true on success.
+// A call from inside a running `vex.call` (a HostFn) is refused: it returns false and stops nothing, because
+// the interpreter is still on the stack below the HostFn. Stop after the outermost call has returned.
 pub fn stop() -> bool {
-    if vex_state != 1 {
+    if vex_state != 1 || vex_calls != 0 {
         return false;
     }
     (*(vex_table as *VexApi)).ready = 0;
@@ -191,7 +195,10 @@ pub fn call(api: *VexApi, vm: *void, name: *u8, argv: *VexValue, argc: i64, ret:
         return STATUS_BINDING;
     }
     let f: fn(*void, *u8, *VexValue, i64, *VexValue) -> i64 = (*api).call;
-    return f(vm, name, argv, argc, ret);
+    vex_calls = vex_calls + 1;
+    let status: i64 = f(vm, name, argv, argc, ret);
+    vex_calls = vex_calls - 1;
+    return status;
 }
 
 pub fn budget(api: *VexApi, vm: *void, units: i64) -> i64 {

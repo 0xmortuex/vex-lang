@@ -59,6 +59,14 @@ fn re(vm: *void, ctx: *void, argv: *VexValue, argc: i64, ret: *VexValue) -> i64 
     return vex.return_int(ret, inner.i);
 }
 
+// A host function must never be able to tear down the interpreter it is running inside.
+fn stops_the_runtime(vm: *void, ctx: *void, argv: *VexValue, argc: i64, ret: *VexValue) -> i64 {
+    if vex.stop() {
+        return vex.return_int(ret, 1);
+    }
+    return vex.return_int(ret, 0);
+}
+
 // Recursion through `map` up to and past the callback limit, then a re-entry from the deepest level.
 // Every result must be a clean status: a value only with status 0, and that value must be right.
 fn deep_sweep(api: *VexApi) -> i64 {
@@ -107,7 +115,8 @@ fn main() -> int {
     assert(vex.bind(api, vm, "takes_str", "(Str)", api as *void, accepts_str) == 0);
     assert(vex.bind(api, vm, "reenter", "()", api as *void, reenter) == 0);
     assert(vex.bind(api, vm, "reenter_once", "(Int) -> Int", api as *void, reenter_once) == 0);
-    assert(load_text(api, vm, "fn ok() -> Int { 7 }\nfn plain(n: Int) { n + 1 }\nfn nz() { host.fails(); }\nfn tag() { host.wrong(); }\nfn reenter_forever() { host.reenter(); }\nfn twice(n: Int) { host.reenter_once(n) }\nfn s(x: Str) { host.takes_str(x); }") == 0);
+    assert(vex.bind(api, vm, "stops_the_runtime", "() -> Int", api as *void, stops_the_runtime) == 0);
+    assert(load_text(api, vm, "fn ok() -> Int { 7 }\nfn plain(n: Int) { n + 1 }\nfn nz() { host.fails(); }\nfn tag() { host.wrong(); }\nfn reenter_forever() { host.reenter(); }\nfn twice(n: Int) { host.reenter_once(n) }\nfn s(x: Str) { host.takes_str(x); }\nfn stops() -> Int { host.stops_the_runtime() }") == 0);
 
     report("ok-call", call0(api, vm, "ok"));
     report("nonzero-status", call0(api, vm, "nz"));
@@ -131,6 +140,10 @@ fn main() -> int {
     report("reentry-ok", vex.call(api, vm, "twice", &start[0], 1, &result));
     report("after-errors", call0(api, vm, "ok"));
     report("deep-sweep", deep_sweep(api));
+    let refused: VexValue = vex.of_unit();
+    report("stop-during-call", vex.call(api, vm, "stops", 0 as *VexValue, 0, &refused));
+    report("stop-during-call-refused", refused.i);
+    report("after-refused-stop", call0(api, vm, "ok"));
     let stale: *void = vex.open(api, 0);
     vex.close(api, vm);
     report("stop", stop_status());

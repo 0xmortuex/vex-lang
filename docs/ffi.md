@@ -145,7 +145,12 @@ through a raw table entry crashes the process, because nothing can catch it on t
 runtime is not running. CPython cannot be restarted in the same process reliably, so `vex.start()` after `vex.stop()` returns a
 table whose `ready` is 0.
 
-A C host calling the table directly must clear its own copy of the pointers before calling `Py_FinalizeEx`.
+`vex.stop()` from inside a running `vex.call` (a `HostFn`, at any re-entry depth) is **refused**: it returns false, stops nothing,
+and the runtime and the call carry on normally. The interpreter is still on the stack below the `HostFn`, so finalising it there
+would crash the process. Call `vex.stop()` after the outermost `vex.call` has returned.
+
+A C host calling the table directly must clear its own copy of the pointers before calling `Py_FinalizeEx`, and must not call
+`Py_FinalizeEx` from inside a `HostFn`: the raw table cannot refuse it, because the running call is the host's own.
 
 ## Status codes
 
