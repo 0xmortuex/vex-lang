@@ -14,7 +14,6 @@
 module vex;
 
 extern fn Py_Initialize() -> void;
-extern fn Py_IsInitialized() -> c_int;
 extern fn PyRun_SimpleString(code: *const c_char) -> c_int;
 extern fn Py_FinalizeEx() -> c_int;
 
@@ -59,8 +58,12 @@ struct VexApi {
     return_str: fn(*void, *VexValue, *u8, i64) -> void,
 }
 
-// Text helpers for building a line into a caller-owned buffer. Each returns the next free index.
+// Text helpers for building a line into a caller-owned buffer. Each returns the next free index and stops
+// at the buffer's last byte, leaving room for a NUL, so text from a script can never overrun it.
 pub fn write_decimal(buffer: []u8, start: u64, value: u64) -> u64 {
+    if start + 21 >= buffer.len {
+        return start;
+    }
     let digits: u64 = 1;
     let probe: u64 = value;
     while probe >= 10 {
@@ -78,6 +81,9 @@ pub fn write_decimal(buffer: []u8, start: u64, value: u64) -> u64 {
 }
 
 pub fn write_i64(buffer: []u8, start: u64, value: i64) -> u64 {
+    if start + 22 >= buffer.len {
+        return start;
+    }
     if value >= 0 {
         return write_decimal(buffer, start, value as u64);
     }
@@ -87,6 +93,12 @@ pub fn write_i64(buffer: []u8, start: u64, value: i64) -> u64 {
 
 pub fn write_text(buffer: []u8, start: u64, text: *u8) -> u64 {
     let length: u64 = len(text);
+    if start >= buffer.len {
+        return start;
+    }
+    if start + length >= buffer.len {
+        length = buffer.len - start - 1;
+    }
     let source: []const u8 = slice(text as *const u8, length);
     for index: u64 in 0..length {
         buffer[start + index] = source[index];
@@ -94,15 +106,26 @@ pub fn write_text(buffer: []u8, start: u64, text: *u8) -> u64 {
     return start + length;
 }
 
-// Start CPython and fill a fresh table. Returns a table whose `ready` is 0 if attach failed;
-// CPython has then already printed why to stderr. `PYTHONHOME` and `PYTHONPATH` must be set.
+// Lifecycle: 0 before start, 1 running, 2 stopped. CPython cannot be restarted, so `stopped` is final.
+let vex_state: i64 = 0;
+let vex_table: i64 = 0;
+
+// Start CPython and fill a fresh table, once. Returns the same table on later calls. If attach failed, or the
+// runtime has been stopped, the returned table's `ready` is 0, and every wrapper below reports status 3.
+// `PYTHONHOME` and `PYTHONPATH` must be set.
 pub fn start() -> *VexApi {
-    if Py_IsInitialized() == 0 {
-        Py_Initialize();
+    if vex_state == 1 {
+        return vex_table as *VexApi;
     }
     let api: *VexApi = alloc(sizeof<VexApi>()) as *VexApi;
     (*api).abi_version = 1;
     (*api).ready = 0;
+    if vex_state == 2 {
+        return api;
+    }
+    Py_Initialize();
+    vex_state = 1;
+    vex_table = api as i64;
     let storage: *u8 = alloc(128) as *u8;
     let code: []u8 = slice(storage, 128);
     let end: u64 = write_text(code, 0, "import vex.embed; vex.embed.attach(");
@@ -114,54 +137,91 @@ pub fn start() -> *VexApi {
     return api;
 }
 
-// Shut CPython down. Close every instance first. Returns true on success.
+// Shut CPython down. Close every instance first. Every table pointer dies with the interpreter, so `ready`
+// is cleared and the wrappers below report status 3 from here on. Returns true on success.
 pub fn stop() -> bool {
+    if vex_state != 1 {
+        return false;
+    }
+    (*(vex_table as *VexApi)).ready = 0;
+    vex_state = 2;
     return Py_FinalizeEx() == 0;
+}
+
+fn usable(api: *VexApi) -> bool {
+    return vex_state == 1 && (api as i64) == vex_table && (*api).ready == 1;
 }
 
 // The table's entry points. Mort calls a function value only through a named binding, so these keep host
 // code to one line per API call.
 pub fn open(api: *VexApi, caps: i64) -> *void {
+    if !usable(api) {
+        return 0 as *void;
+    }
     let f: fn(i64) -> *void = (*api).open;
     return f(caps);
 }
 
 pub fn close(api: *VexApi, vm: *void) -> void {
+    if !usable(api) {
+        return;
+    }
     let f: fn(*void) -> void = (*api).close;
     f(vm);
 }
 
 pub fn bind(api: *VexApi, vm: *void, name: *u8, sig: *u8, ctx: *void, callback: fn(*void, *void, *VexValue, i64, *VexValue) -> i64) -> i64 {
+    if !usable(api) {
+        return STATUS_BINDING;
+    }
     let f: fn(*void, *u8, *u8, *void, fn(*void, *void, *VexValue, i64, *VexValue) -> i64) -> i64 = (*api).bind;
     return f(vm, name, sig, ctx, callback);
 }
 
 pub fn load(api: *VexApi, vm: *void, path: *u8, source: *u8, length: i64) -> i64 {
+    if !usable(api) {
+        return STATUS_BINDING;
+    }
     let f: fn(*void, *u8, *u8, i64) -> i64 = (*api).load;
     return f(vm, path, source, length);
 }
 
 pub fn call(api: *VexApi, vm: *void, name: *u8, argv: *VexValue, argc: i64, ret: *VexValue) -> i64 {
+    if !usable(api) {
+        return STATUS_BINDING;
+    }
     let f: fn(*void, *u8, *VexValue, i64, *VexValue) -> i64 = (*api).call;
     return f(vm, name, argv, argc, ret);
 }
 
 pub fn budget(api: *VexApi, vm: *void, units: i64) -> i64 {
+    if !usable(api) {
+        return STATUS_BINDING;
+    }
     let f: fn(*void, i64) -> i64 = (*api).budget;
     return f(vm, units);
 }
 
 pub fn error(api: *VexApi, vm: *void) -> *u8 {
+    if !usable(api) {
+        return "the Vex runtime has been stopped";
+    }
     let f: fn(*void) -> *u8 = (*api).error;
     return f(vm);
 }
 
 pub fn fail(api: *VexApi, vm: *void, message: *u8) -> void {
+    if !usable(api) {
+        return;
+    }
     let f: fn(*void, *u8) -> void = (*api).fail;
     f(vm, message);
 }
 
 pub fn return_str(api: *VexApi, vm: *void, ret: *VexValue, text: *u8, length: i64) -> void {
+    if !usable(api) {
+        return;
+    }
     let f: fn(*void, *VexValue, *u8, i64) -> void = (*api).return_str;
     f(vm, ret, text, length);
 }

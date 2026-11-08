@@ -37,11 +37,16 @@ fn say_int(line: *Line, value: i64) -> void {
     (*line).at = vex.write_i64(buffer, (*line).at, value);
 }
 
+// Print the line. `say` cannot overrun it: the text helpers stop at the end of the buffer.
 fn end(line: *Line) -> void {
     let buffer: []u8 = slice((*line).data, MAX_LINE);
     buffer[(*line).at] = 0;
     println((*line).data);
     (*line).at = 0;
+}
+
+fn drop_line(line: *Line) -> void {
+    free((*line).data as *void);
 }
 
 // host.tax_cents(amount): Mort's tax table, called from Vex.
@@ -50,6 +55,7 @@ fn tax_cents(vm: *void, ctx: *void, argv: *VexValue, argc: i64, ret: *VexValue) 
     let amount: i64 = vex.arg_int(argv, 0);
     let tax: i64 = amount * 8 / 100;
     let line: Line = new_line();
+    defer drop_line(&line);
     say(&line, "    Vex -> Mort tax_cents(");
     say_int(&line, amount);
     say(&line, ") = ");
@@ -72,6 +78,7 @@ fn customer_tier(vm: *void, ctx: *void, argv: *VexValue, argc: i64, ret: *VexVal
         tier = "bronze";
     }
     let line: Line = new_line();
+    defer drop_line(&line);
     say(&line, "    Vex -> Mort customer_tier(\"");
     say(&line, id);
     if tier == (0 as *u8) {
@@ -87,7 +94,7 @@ fn customer_tier(vm: *void, ctx: *void, argv: *VexValue, argc: i64, ret: *VexVal
     return 0;
 }
 
-// Read a whole file. Returns (buffer, length, ok).
+// Read a whole file. Returns (buffer, length, ok). A file too big for the buffer is not ok, rather than truncated.
 fn read_script(path: *u8) -> (*u8, i64, bool) {
     let buffer: *u8 = alloc(MAX_SCRIPT) as *u8;
     let handle: *void = file_open(path, "rb");
@@ -96,11 +103,12 @@ fn read_script(path: *u8) -> (*u8, i64, bool) {
     }
     let size: u64 = file_read(handle, buffer, MAX_SCRIPT);
     file_close(handle);
-    return (buffer, size as i64, true);
+    return (buffer, size as i64, size < MAX_SCRIPT);
 }
 
 fn price_order(api: *VexApi, vm: *void, order: Order) -> void {
     let line: Line = new_line();
+    defer drop_line(&line);
     say(&line, "  Mort -> Vex price(");
     say_int(&line, order.quantity);
     say(&line, ", ");
@@ -136,6 +144,7 @@ fn price_order(api: *VexApi, vm: *void, order: Order) -> void {
 
 fn run_rules(api: *VexApi, path: *u8, orders: *Order, count: i64) -> void {
     let line: Line = new_line();
+    defer drop_line(&line);
     mort_to_vex = 0;
     vex_to_mort = 0;
     say(&line, "== rules: ");

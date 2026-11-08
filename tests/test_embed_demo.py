@@ -84,4 +84,39 @@ def test_real_mort_error_paths(runner: Any, tmp_path: Path) -> None:
         "runaway-reentry:runtime error",
         "reentry-ok:ok",
         "after-errors:ok",
+        "deep-sweep:ok",
+        "stop:ok",
+        "stop-twice:binding error",
+        "after-stop-call:binding error",
+        "after-stop-load:binding error",
+        "after-stop-budget:binding error",
+        "after-stop-bind:binding error",
+        "the Vex runtime has been stopped",
     ]
+    assert result.stderr == ""
+
+
+def test_real_mort_host_imports_exactly_the_documented_cpython_functions(runner: Any, tmp_path: Path) -> None:
+    exe = runner.build(ROOT / "tests" / "embed" / "paths.mx", tmp_path)
+    data = exe.read_bytes()
+    assert b"Py_IsInitialized" not in data
+    for name in (b"Py_Initialize", b"PyRun_SimpleString", b"Py_FinalizeEx"):
+        assert name in data
+
+
+def test_demo_survives_a_script_passing_a_huge_string(runner: Any, tmp_path: Path) -> None:
+    script = tmp_path / "long.vx"
+    script.write_text(
+        "fn price(quantity: Int, unit_cents: Int, customer: Str) -> Int {\n"
+        '    host.customer_tier("x".repeat(3000));\n'
+        "    quantity * unit_cents\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    exe = runner.build(runner.DEMO_SOURCE, tmp_path)
+    env = runner.host_env()
+    env["VEX_DEMO_RULES"] = str(script)
+    result = subprocess.run([str(exe)], env=env, cwd=runner.HERE, capture_output=True, encoding="utf-8", timeout=120)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "Mort: no such customer" in result.stdout
+    assert "host continues" in result.stdout

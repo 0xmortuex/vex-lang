@@ -48,6 +48,40 @@ fn reenter_once(vm: *void, ctx: *void, argv: *VexValue, argc: i64, ret: *VexValu
     return vex.return_int(ret, inner.i * 2);
 }
 
+fn re(vm: *void, ctx: *void, argv: *VexValue, argc: i64, ret: *VexValue) -> i64 {
+    let api: *VexApi = ctx as *VexApi;
+    let inner: VexValue = vex.of_unit();
+    let status: i64 = vex.call(api, vm, "leaf", 0 as *VexValue, 0, &inner);
+    if status != 0 {
+        vex.fail(api, vm, "re-entry failed");
+        return status;
+    }
+    return vex.return_int(ret, inner.i);
+}
+
+// Recursion through `map` up to and past the callback limit, then a re-entry from the deepest level.
+// Every result must be a clean status: a value only with status 0, and that value must be right.
+fn deep_sweep(api: *VexApi) -> i64 {
+    let vm: *void = vex.open(api, 0);
+    assert(vex.bind(api, vm, "re", "() -> Int", api as *void, re) == 0);
+    let src: *u8 = "fn leaf() -> Int { 7 }\nfn g(n: Int) -> Int { if n == 0 { host.re() } else { [n].map(|x| g(x - 1))[0] } }\nfn f(n: Int) -> Int { g(n) }";
+    assert(vex.load(api, vm, "sweep.vx", src, vex.c_len(src)) == 0);
+    let worst: i64 = 0;
+    for n: i64 in 0..700 {
+        let args: [VexValue; 1] = [vex.of_int(n)];
+        let result: VexValue = vex.of_unit();
+        let status: i64 = vex.call(api, vm, "f", &args[0], 1, &result);
+        if status == 0 && (result.tag != 1 || result.i != 7) {
+            worst = 99;
+        }
+        if status != 0 && status != 2 {
+            worst = 99;
+        }
+    }
+    vex.close(api, vm);
+    return worst;
+}
+
 fn load_text(api: *VexApi, vm: *void, text: *u8) -> i64 {
     return vex.load(api, vm, "paths.vx", text, vex.c_len(text));
 }
@@ -55,6 +89,13 @@ fn load_text(api: *VexApi, vm: *void, text: *u8) -> i64 {
 fn call0(api: *VexApi, vm: *void, name: *u8) -> i64 {
     let result: VexValue = vex.of_unit();
     return vex.call(api, vm, name, 0 as *VexValue, 0, &result);
+}
+
+fn stop_status() -> i64 {
+    if vex.stop() {
+        return 0;
+    }
+    return 3;
 }
 
 fn main() -> int {
@@ -89,7 +130,20 @@ fn main() -> int {
     let start: [VexValue; 1] = [vex.of_int(1)];
     report("reentry-ok", vex.call(api, vm, "twice", &start[0], 1, &result));
     report("after-errors", call0(api, vm, "ok"));
+    report("deep-sweep", deep_sweep(api));
+    let stale: *void = vex.open(api, 0);
     vex.close(api, vm);
-    vex.stop();
+    report("stop", stop_status());
+    report("stop-twice", stop_status());
+    report("after-stop-call", call0(api, stale, "ok"));
+    report("after-stop-load", load_text(api, stale, "fn f() { }"));
+    report("after-stop-budget", vex.budget(api, stale, 10));
+    report("after-stop-bind", vex.bind(api, stale, "x", "()", api as *void, fails_silently));
+    if vex.open(api, 0) != (0 as *void) {
+        println("after-stop-open:not null");
+    }
+    vex.close(api, stale);
+    vex.fail(api, stale, "ignored");
+    println(vex.error(api, stale));
     return 0;
 }
