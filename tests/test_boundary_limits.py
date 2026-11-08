@@ -250,6 +250,75 @@ def test_cross_instance_reentry_shares_one_depth_limit() -> None:
     assert deepest[0] <= MAX_HOST_DEPTH
 
 
+def test_reentry_past_the_limit_names_a_script_location() -> None:
+    h = Host()
+    rendered: list[str] = []
+
+    def deep() -> int:
+        try:
+            r: int = h.call("f", [])
+        except VexRuntimeError as e:
+            rendered.append(e.render())
+            raise
+        return r
+
+    h.bind("deep", "() -> Int", deep)
+    h.load("d.vx", "fn f() -> Int {\n  host.deep()\n}")
+    with pytest.raises(VexRuntimeError):
+        h.call("f", [])
+    assert "nested too deeply" in rendered[0] and "d.vx:1:" in rendered[0]
+
+
+def test_reentry_past_the_limit_is_located_through_the_abi() -> None:
+    api = Api()
+    vm = api.open()
+    errors: list[str] = []
+
+    def deep(vm_: Any, ctx: Any, argv: Any, argc: int, ret: Any) -> int:
+        inner = VexValue()
+        status = int(api.table.call(vm_, b"f", None, 0, ctypes.byref(inner)))
+        if status != OK:
+            errors.append(api.error(vm_))
+            return status
+        ret[0].tag, ret[0].i = 1, inner.i
+        return 0
+
+    cb = HOST_FN(deep)
+    assert api.table.bind(vm, b"deep", b"() -> Int", None, cb) == OK
+    assert api.load(vm, "fn f() -> Int {\n  host.deep()\n}") == OK
+    assert api.call(vm, b"f", [])[0] == RUNTIME
+    assert "nested too deeply" in errors[0]
+    assert "rule.vx:1:" in errors[0]
+
+
+def test_budget_stop_at_the_entry_of_a_reentrant_call_is_located() -> None:
+    h = Host()
+    rendered: list[str] = []
+
+    def again() -> None:
+        try:
+            h.call("inner", [])
+        except VexBudgetError as e:
+            rendered.append(e.render())
+            raise
+
+    h.budget(1)
+    h.bind("again", "()", again)
+    h.load("e.vx", "fn inner() { 1 }\nfn go() { host.again(); }")
+    with pytest.raises(VexBudgetError):
+        h.call("go", [])
+    assert "e.vx:" in rendered[0]
+
+
+def test_budget_stop_while_returning_a_str_is_located() -> None:
+    h = Host()
+    h.budget(3)
+    h.load("e.vx", 'fn go() { "xxxxxxxxxx" }')
+    with pytest.raises(VexBudgetError) as e:
+        h.call("go", [])
+    assert "e.vx:1:" in e.value.render()
+
+
 def test_max_depth_is_counted_correctly_after_a_failed_chain() -> None:
     h = Host()
     h.bind("loop", "()", lambda: h.call("go", []))

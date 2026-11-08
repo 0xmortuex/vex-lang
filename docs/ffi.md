@@ -164,7 +164,11 @@ A C host calling the table directly must clear its own copy of the pointers befo
 
 Scripts cannot catch these. No exception or crash crosses the boundary: every entry point catches `BaseException`, including
 any raised while it reports another failure, and returns a status (a failed `open` returns null, `error` always returns a valid
-string). The instance stays usable after any failure. Status 2 and 4 messages always name a script location.
+string). The instance stays usable after any failure. A status 2 or 4 message from running a script names a script location. For
+a stop that comes before any script code has run in that call (a re-entry past the depth limit, or a budget stop at function
+entry), the location is the declaration of the function that was being entered, which is the location the host asked to reach.
+The only exception is a failure of the boundary itself, such as `MemoryError` while copying a result: it is reported as status 2
+with the text `internal error: ...` and no script location, because no script is at fault.
 
 The guarantee needs Python stack headroom when native code calls in, because `ctypes` drops a callback that fails on entry and
 returns garbage. Depth limits (below) provide that headroom at every callback, on the default recursion limit of 1000. Python's default SIGINT
@@ -241,7 +245,7 @@ The exact memory guarantee is this. The budget is a work limit, not a memory cap
 A struct field or enum can be assigned a value that reaches back to itself (`a.next = Some(a)`, or a struct in its own list field).
 Printing and interpolating such a value, and comparing two of them with `==`, `!=`, `assert_eq`, `contains` or `index_of`, is a runtime error:
 status 2 here, exit code 2 from the Vex CLI, at the script location of the operation. It is detected the moment the cycle is
-reached, so it does not spend the budget. `a == a`, on the same object, is simply true, and comparing two values that differ before
+reached, so it needs no budget to end it. `a == a`, on the same object, is simply true, and comparing two values that differ before
 any cycle is reached returns `false`. Two cycles of different lengths whose elements agree still terminate, with the same error. Shared
 values that are not cycles are fine; the check tracks only what is on the current path.
 
@@ -257,7 +261,9 @@ A `HostFn` may call back into `call` on the same thread (native to Vex to native
 outer call reports a budget stop as status 4 even if the `HostFn` reports a failure of its own. `load` and `close` should not be called
 during a running `call` on the same instance.
 
-Two limits apply to the **whole process**, across every instance, and a deeper call fails with status 2 at a script location:
+Two limits apply to the **whole process**, across every instance. A deeper call fails with status 2 at a script location: the
+call to the builtin for callbacks, and the declaration of the function being entered for host re-entry, since the limit stops it
+before any of its code runs:
 
 | Limit | Value | Bounds |
 |-------|------:|--------|

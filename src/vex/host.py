@@ -172,8 +172,10 @@ class Host:
     def call(self, name: str, args: list[Any]) -> Any:
         """Call a script function. Raises VexRuntimeError, VexBudgetError or VexBindingError."""
         sym, code, ret = self._lookup(name, args)
+        # A failure before any script code has run has no running frame to point at; name the function being entered.
+        entry = [(sym.name, sym.decl.name_span or sym.decl.span)]
         if Host._active_calls >= MAX_HOST_DEPTH:
-            raise VexRuntimeError(f"host re-entry is nested too deeply (more than {MAX_HOST_DEPTH} levels)")
+            raise VexRuntimeError(f"host re-entry is nested too deeply (more than {MAX_HOST_DEPTH} levels)", entry)
         vm = self._vm
         if self._depth == 0:
             vm.fuel = self._budget
@@ -187,16 +189,16 @@ class Host:
             if type(result) is str:  # the result is copied to the host, once per crossing
                 vm.charge(len(result))
         except VexBudgetExceeded as e:
-            raise VexBudgetError(e.message, e.trace or []) from None
+            raise VexBudgetError(e.message, e.trace or entry) from None
         except VexHostContractError as e:
-            rendered = VexRuntimeError(e.message, e.trace or []).render()
+            rendered = VexRuntimeError(e.message, e.trace or entry).render()
             raise VexBindingError(rendered.removeprefix("runtime error: ")) from None
         except VexPanic as e:
-            raise VexRuntimeError(e.message, e.trace or []) from None
+            raise VexRuntimeError(e.message, e.trace or entry) from None
         except RecursionError:
-            raise VexRuntimeError("recursion too deep while comparing or printing a value") from None
+            raise VexRuntimeError("recursion too deep while comparing or printing a value", entry) from None
         except Exception as e:
-            raise VexRuntimeError(f"internal error: {type(e).__name__}: {e}") from None
+            raise VexRuntimeError(f"internal error: {type(e).__name__}: {e}", entry) from None
         finally:
             self._depth -= 1
             Host._active_calls -= 1
@@ -204,8 +206,7 @@ class Host:
         if not isinstance(ret, (TNever, TVar)):  # a body that only panics never produces a value
             problem = _value_problem(ret, result)
             if problem is not None:
-                span = sym.decl.name_span or sym.decl.span
-                raise VexRuntimeError(f"`{name}` returned an invalid value: {problem}", [(sym.name, span)])
+                raise VexRuntimeError(f"`{name}` returned an invalid value: {problem}", entry)
         return result
 
     def _lookup(self, name: str, args: list[Any]) -> tuple[Any, Any, Type]:
