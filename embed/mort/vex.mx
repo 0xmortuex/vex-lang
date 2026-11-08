@@ -1,0 +1,281 @@
+// Mort bindings for the Vex embedding ABI, version 1. docs/ffi.md is the normative contract.
+//
+// Build a host with `mortc ... --package vex=embed/mort/vex.mx --link <libpython>`, then:
+//
+//     import vex;
+//     let api: *VexApi = vex.start();          // starts CPython, fills the table
+//     let vm: *void = vex.open(api, 0);
+//     vex.load(api, vm, path, source, length);
+//     let status: i64 = vex.call(api, vm, name, argv, argc, &result);
+//     vex.stop();
+//
+// The field order of both structs is the ABI. Do not reorder them.
+
+module vex;
+
+extern fn Py_Initialize() -> void;
+extern fn Py_IsInitialized() -> c_int;
+extern fn PyRun_SimpleString(code: *const c_char) -> c_int;
+extern fn Py_FinalizeEx() -> c_int;
+
+const TAG_UNIT: i64 = 0;
+const TAG_INT: i64 = 1;
+const TAG_FLOAT: i64 = 2;
+const TAG_BOOL: i64 = 3;
+const TAG_STR: i64 = 4;
+
+const STATUS_OK: i64 = 0;
+const STATUS_COMPILE: i64 = 1;
+const STATUS_RUNTIME: i64 = 2;
+const STATUS_BINDING: i64 = 3;
+const STATUS_BUDGET: i64 = 4;
+
+const CAP_PRINT: i64 = 1;
+const CAP_READ: i64 = 2;
+const CAP_WRITE: i64 = 4;
+const CAP_ENV: i64 = 8;
+
+struct VexValue {
+    tag: i64,
+    i: i64,
+    f: f64,
+    s: *u8,
+    len: i64,
+}
+
+// A HostFn is `fn(*void, *void, *VexValue, i64, *VexValue) -> i64`: vm, ctx, argv, argc, ret.
+// `bind` keeps it last: Mort's parser cannot split a function-type parameter that is not the last one.
+struct VexApi {
+    abi_version: i64,
+    ready: i64,
+    open: fn(i64) -> *void,
+    close: fn(*void) -> void,
+    bind: fn(*void, *u8, *u8, *void, fn(*void, *void, *VexValue, i64, *VexValue) -> i64) -> i64,
+    load: fn(*void, *u8, *u8, i64) -> i64,
+    call: fn(*void, *u8, *VexValue, i64, *VexValue) -> i64,
+    budget: fn(*void, i64) -> i64,
+    error: fn(*void) -> *u8,
+    fail: fn(*void, *u8) -> void,
+    return_str: fn(*void, *VexValue, *u8, i64) -> void,
+}
+
+// Text helpers for building a line into a caller-owned buffer. Each returns the next free index.
+pub fn write_decimal(buffer: []u8, start: u64, value: u64) -> u64 {
+    let digits: u64 = 1;
+    let probe: u64 = value;
+    while probe >= 10 {
+        probe = probe / 10;
+        digits = digits + 1;
+    }
+    let rest: u64 = value;
+    let index: u64 = digits;
+    while index > 0 {
+        index = index - 1;
+        buffer[start + index] = ((rest % 10) as u8) + 48;
+        rest = rest / 10;
+    }
+    return start + digits;
+}
+
+pub fn write_i64(buffer: []u8, start: u64, value: i64) -> u64 {
+    if value >= 0 {
+        return write_decimal(buffer, start, value as u64);
+    }
+    buffer[start] = 45;
+    return write_decimal(buffer, start + 1, (~(value as u64)) + 1);
+}
+
+pub fn write_text(buffer: []u8, start: u64, text: *u8) -> u64 {
+    let length: u64 = len(text);
+    let source: []const u8 = slice(text as *const u8, length);
+    for index: u64 in 0..length {
+        buffer[start + index] = source[index];
+    }
+    return start + length;
+}
+
+// Start CPython and fill a fresh table. Returns a table whose `ready` is 0 if attach failed;
+// CPython has then already printed why to stderr. `PYTHONHOME` and `PYTHONPATH` must be set.
+pub fn start() -> *VexApi {
+    if Py_IsInitialized() == 0 {
+        Py_Initialize();
+    }
+    let api: *VexApi = alloc(sizeof<VexApi>()) as *VexApi;
+    (*api).abi_version = 1;
+    (*api).ready = 0;
+    let storage: *u8 = alloc(128) as *u8;
+    let code: []u8 = slice(storage, 128);
+    let end: u64 = write_text(code, 0, "import vex.embed; vex.embed.attach(");
+    end = write_decimal(code, end, api as u64);
+    end = write_text(code, end, ")\n");
+    code[end] = 0;
+    PyRun_SimpleString(storage as *const c_char);
+    free(storage as *void);
+    return api;
+}
+
+// Shut CPython down. Close every instance first. Returns true on success.
+pub fn stop() -> bool {
+    return Py_FinalizeEx() == 0;
+}
+
+// The table's entry points. Mort calls a function value only through a named binding, so these keep host
+// code to one line per API call.
+pub fn open(api: *VexApi, caps: i64) -> *void {
+    let f: fn(i64) -> *void = (*api).open;
+    return f(caps);
+}
+
+pub fn close(api: *VexApi, vm: *void) -> void {
+    let f: fn(*void) -> void = (*api).close;
+    f(vm);
+}
+
+pub fn bind(api: *VexApi, vm: *void, name: *u8, sig: *u8, ctx: *void, callback: fn(*void, *void, *VexValue, i64, *VexValue) -> i64) -> i64 {
+    let f: fn(*void, *u8, *u8, *void, fn(*void, *void, *VexValue, i64, *VexValue) -> i64) -> i64 = (*api).bind;
+    return f(vm, name, sig, ctx, callback);
+}
+
+pub fn load(api: *VexApi, vm: *void, path: *u8, source: *u8, length: i64) -> i64 {
+    let f: fn(*void, *u8, *u8, i64) -> i64 = (*api).load;
+    return f(vm, path, source, length);
+}
+
+pub fn call(api: *VexApi, vm: *void, name: *u8, argv: *VexValue, argc: i64, ret: *VexValue) -> i64 {
+    let f: fn(*void, *u8, *VexValue, i64, *VexValue) -> i64 = (*api).call;
+    return f(vm, name, argv, argc, ret);
+}
+
+pub fn budget(api: *VexApi, vm: *void, units: i64) -> i64 {
+    let f: fn(*void, i64) -> i64 = (*api).budget;
+    return f(vm, units);
+}
+
+pub fn error(api: *VexApi, vm: *void) -> *u8 {
+    let f: fn(*void) -> *u8 = (*api).error;
+    return f(vm);
+}
+
+pub fn fail(api: *VexApi, vm: *void, message: *u8) -> void {
+    let f: fn(*void, *u8) -> void = (*api).fail;
+    f(vm, message);
+}
+
+pub fn return_str(api: *VexApi, vm: *void, ret: *VexValue, text: *u8, length: i64) -> void {
+    let f: fn(*void, *VexValue, *u8, i64) -> void = (*api).return_str;
+    f(vm, ret, text, length);
+}
+
+pub fn c_len(text: *u8) -> i64 {
+    return len(text) as i64;
+}
+
+pub fn of_unit() -> VexValue {
+    return VexValue { tag: TAG_UNIT, i: 0, f: 0.0, s: 0 as *u8, len: 0 };
+}
+
+pub fn of_int(value: i64) -> VexValue {
+    return VexValue { tag: TAG_INT, i: value, f: 0.0, s: 0 as *u8, len: 0 };
+}
+
+pub fn of_float(value: f64) -> VexValue {
+    return VexValue { tag: TAG_FLOAT, i: 0, f: value, s: 0 as *u8, len: 0 };
+}
+
+pub fn of_bool(value: bool) -> VexValue {
+    let bit: i64 = 0;
+    if value {
+        bit = 1;
+    }
+    return VexValue { tag: TAG_BOOL, i: bit, f: 0.0, s: 0 as *u8, len: 0 };
+}
+
+pub fn of_str(text: *u8, length: i64) -> VexValue {
+    return VexValue { tag: TAG_STR, i: 0, f: 0.0, s: text, len: length };
+}
+
+// A NUL-terminated string.
+pub fn of_cstr(text: *u8) -> VexValue {
+    return of_str(text, c_len(text));
+}
+
+// argv element `index`, for use inside a HostFn or on any value array.
+pub fn arg(argv: *VexValue, index: i64) -> VexValue {
+    let values: []VexValue = slice(argv, (index + 1) as u64);
+    return values[index as u64];
+}
+
+// Value accessors. Each traps (Mort `assert`) on the wrong tag: a signature check on the Vex side means a
+// well-behaved script can never reach that trap, so it marks a bug in the binding.
+pub fn arg_int(argv: *VexValue, index: i64) -> i64 {
+    let value: VexValue = arg(argv, index);
+    assert(value.tag == TAG_INT);
+    return value.i;
+}
+
+pub fn arg_float(argv: *VexValue, index: i64) -> f64 {
+    let value: VexValue = arg(argv, index);
+    assert(value.tag == TAG_FLOAT);
+    return value.f;
+}
+
+pub fn arg_bool(argv: *VexValue, index: i64) -> bool {
+    let value: VexValue = arg(argv, index);
+    assert(value.tag == TAG_BOOL);
+    return value.i != 0;
+}
+
+// The string's bytes, NUL-terminated by Vex. Use `arg(argv, index).len` for the byte length.
+pub fn arg_str(argv: *VexValue, index: i64) -> *u8 {
+    let value: VexValue = arg(argv, index);
+    assert(value.tag == TAG_STR);
+    return value.s;
+}
+
+// A HostFn's success returns: set `ret` and return 0.
+pub fn return_int(ret: *VexValue, value: i64) -> i64 {
+    (*ret).tag = TAG_INT;
+    (*ret).i = value;
+    return STATUS_OK;
+}
+
+pub fn return_float(ret: *VexValue, value: f64) -> i64 {
+    (*ret).tag = TAG_FLOAT;
+    (*ret).f = value;
+    return STATUS_OK;
+}
+
+pub fn return_bool(ret: *VexValue, value: bool) -> i64 {
+    (*ret).tag = TAG_BOOL;
+    if value {
+        (*ret).i = 1;
+    } else {
+        (*ret).i = 0;
+    }
+    return STATUS_OK;
+}
+
+pub fn return_unit(ret: *VexValue) -> i64 {
+    (*ret).tag = TAG_UNIT;
+    return STATUS_OK;
+}
+
+// A short name for each status, for host diagnostics.
+pub fn status_name(status: i64) -> *u8 {
+    if status == STATUS_OK {
+        return "ok";
+    }
+    if status == STATUS_COMPILE {
+        return "compile error";
+    }
+    if status == STATUS_RUNTIME {
+        return "runtime error";
+    }
+    if status == STATUS_BINDING {
+        return "binding error";
+    }
+    if status == STATUS_BUDGET {
+        return "budget exhausted";
+    }
+    return "unknown status";
+}
