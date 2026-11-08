@@ -32,7 +32,9 @@ PARTS = 'let parts = "a,".repeat(n / 2).split(",");'
 MAP = "let mut m: Map[Int, Int] = #{}; for i in 0..n { m.insert(i, i); }"
 # Two equal keys that are different objects: the lookup must compare them, character by character.
 KEYED = 'let k = "a".repeat(n); let k2 = "a".repeat(n); let mut m: Map[Str, Int] = #{k: 1};'
-TUPLE_KEYED = 'let k = ("a".repeat(n), 1); let k2 = ("a".repeat(n), 1); let mut m: Map[(Str, Int), Int] = #{k: 1};'
+TUPLE_KEYED = (
+    'let k = ("a".repeat(n), 1); let k2 = ("a".repeat(n), 1); let mut m: Map[(Str, Int), Int] = #{k: 1};'
+)
 
 
 # builtin name -> (setup, one iteration of the loop). The cost of each op scales with `n`.
@@ -95,28 +97,74 @@ CONSTANT: dict[str, str] = {
     "assert": "constant",
     "exit": "ends the script",
     **dict.fromkeys(
-        ["Int.abs", "Int.pow", "Int.min", "Int.max", "Int.signum", "Int.to_float", "Int.to_str", "Int.to_char",
-         "Float.abs", "Float.floor", "Float.ceil", "Float.round", "Float.sqrt", "Float.min", "Float.max", "Float.is_nan",
-         "Float.to_int", "Float.to_str", "Bool.to_str"],
+        [
+            "Int.abs",
+            "Int.pow",
+            "Int.min",
+            "Int.max",
+            "Int.signum",
+            "Int.to_float",
+            "Int.to_str",
+            "Int.to_char",
+            "Float.abs",
+            "Float.floor",
+            "Float.ceil",
+            "Float.round",
+            "Float.sqrt",
+            "Float.min",
+            "Float.max",
+            "Float.is_nan",
+            "Float.to_int",
+            "Float.to_str",
+            "Bool.to_str",
+        ],
         "scalar input, bounded result",
     ),  # fmt: skip
     **dict.fromkeys(["Str.len", "Str.is_empty", "Str.char_at", "Str.code", "Str.to_str"], "O(1)"),
-    **dict.fromkeys(["List.len", "List.is_empty", "List.push", "List.pop", "List.get", "List.first", "List.last"], "O(1), amortised"),
+    **dict.fromkeys(
+        ["List.len", "List.is_empty", "List.push", "List.pop", "List.get", "List.first", "List.last"],
+        "O(1), amortised",
+    ),
     **dict.fromkeys(["List.clear", "Map.clear"], "frees only what was already charged when it was built"),
     **dict.fromkeys(["Map.len", "Map.is_empty", "Range.len", "Range.contains"], "O(1)"),
     **dict.fromkeys(
-        ["Option.is_some", "Option.is_none", "Option.unwrap", "Option.expect", "Option.unwrap_or", "Option.ok_or",
-         "Result.is_ok", "Result.is_err", "Result.unwrap_or", "Result.ok"],
+        [
+            "Option.is_some",
+            "Option.is_none",
+            "Option.unwrap",
+            "Option.expect",
+            "Option.unwrap_or",
+            "Option.ok_or",
+            "Result.is_ok",
+            "Result.is_err",
+            "Result.unwrap_or",
+            "Result.ok",
+        ],
         "O(1)",
     ),  # fmt: skip
     **dict.fromkeys(
         ["Option.map", "Option.and_then", "Result.map", "Result.map_err", "Result.and_then"],
         "one callback, charged by vm.call",
     ),
-    **dict.fromkeys(["Result.unwrap", "Result.expect", "Result.unwrap_err"], "only formats on the path that ends the script"),
     **dict.fromkeys(
-        ["math.sqrt", "math.sin", "math.cos", "math.tan", "math.atan", "math.exp", "math.log10", "math.ln", "math.pow",
-         "math.atan2", "math.gcd", "math.hypot"],
+        ["Result.unwrap", "Result.expect", "Result.unwrap_err"],
+        "only formats on the path that ends the script",
+    ),
+    **dict.fromkeys(
+        [
+            "math.sqrt",
+            "math.sin",
+            "math.cos",
+            "math.tan",
+            "math.atan",
+            "math.exp",
+            "math.log10",
+            "math.ln",
+            "math.pow",
+            "math.atan2",
+            "math.gcd",
+            "math.hypot",
+        ],
         "scalar input, bounded result",
     ),  # fmt: skip
     "env.args": "bounded by the host's own arguments; empty when embedded",
@@ -230,7 +278,9 @@ def test_read_file_stops_while_reading_a_large_file(tmp_path: Path) -> None:
 def test_read_line_keeps_a_long_line_whole(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(sys, "stdin", io.StringIO("y" * 100_000 + "\nsecond\n"))
     h = Host(CAP_ALL)
-    h.load("r.vx", "fn go() -> Int { io.read_line().unwrap().len() }\nfn second() { io.read_line().unwrap() }")
+    h.load(
+        "r.vx", "fn go() -> Int { io.read_line().unwrap().len() }\nfn second() { io.read_line().unwrap() }"
+    )
     assert h.call("go", []) == 100_000
     assert h.call("second", []) == "second"
 

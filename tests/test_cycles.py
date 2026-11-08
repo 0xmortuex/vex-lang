@@ -16,7 +16,7 @@ SRC = Path(__file__).resolve().parent.parent / "src"
 NODE = "struct N { v: Int, next: Option[N] }\n"
 TREE = "struct K { kids: List[K] }\n"
 MAPPED = "struct M { kids: Map[Int, M] }\n"
-LOOP = 'fn loop(v: Int) -> N { let mut a = N { v: v, next: None }; a.next = Some(a); a }\n'
+LOOP = "fn loop(v: Int) -> N { let mut a = N { v: v, next: None }; a.next = Some(a); a }\n"
 
 
 def host(src: str) -> Host:
@@ -52,7 +52,11 @@ CYCLIC_EQUAL = [
     ("assert-eq", NODE + LOOP + "fn go() { assert_eq(loop(1), loop(1)); 1 }"),
     ("contains", NODE + LOOP + "fn go() { if [loop(1)].contains(loop(1)) { 1 } else { 0 } }"),
     ("index-of", NODE + LOOP + "fn go() { [loop(1)].index_of(loop(1)).unwrap_or(0) }"),
-    ("via-list", TREE + "fn k() -> K { let mut a = K { kids: [] }; a.kids.push(a); a }\nfn go() { if k() == k() { 1 } else { 0 } }"),
+    (
+        "via-list",
+        TREE
+        + "fn k() -> K { let mut a = K { kids: [] }; a.kids.push(a); a }\nfn go() { if k() == k() { 1 } else { 0 } }",
+    ),
 ]
 
 
@@ -67,9 +71,13 @@ def test_equality_of_cycles_is_a_located_runtime_error(name: str, src: str) -> N
 
 
 def test_equality_of_different_cycles_of_different_length_terminates() -> None:
-    src = NODE + LOOP + (
-        "fn two() -> N { let mut a = N { v: 1, next: None }; let mut b = N { v: 1, next: Some(a) }; a.next = Some(b); a }\n"
-        "fn go() { if loop(1) == two() { 1 } else { 0 } }"
+    src = (
+        NODE
+        + LOOP
+        + (
+            "fn two() -> N { let mut a = N { v: 1, next: None }; let mut b = N { v: 1, next: Some(a) }; a.next = Some(b); a }\n"
+            "fn go() { if loop(1) == two() { 1 } else { 0 } }"
+        )
     )
     with pytest.raises(VexRuntimeError):
         host(src).call("go", [])
@@ -90,7 +98,7 @@ def test_comparing_a_cycle_with_itself_is_true() -> None:
     [
         "struct T { v: Int }\nfn go() { let t = T { v: 1 }; let a = [t, t]; let b = [t, t]; if a == b { 1 } else { 0 } }",
         "enum E { L, B(E, E) }\nfn go() { let a = B(L, L); let c = B(a, a); let d = B(a, a); if c == d { 1 } else { 0 } }",
-        "enum E { L, B(E, E) }\nfn go() { let a = B(L, L); let c = B(a, a); if \"{c}\" == \"{c}\" { 1 } else { 0 } }",
+        'enum E { L, B(E, E) }\nfn go() { let a = B(L, L); let c = B(a, a); if "{c}" == "{c}" { 1 } else { 0 } }',
     ],
     ids=["shared-list", "shared-tree-equal", "shared-tree-display"],
 )
@@ -117,11 +125,20 @@ def run_cli(tmp_path: Path, src: str) -> subprocess.CompletedProcess[str]:
     script = tmp_path / "cyc.vx"
     script.write_text(src, encoding="utf-8")
     env = dict(os.environ, PYTHONPATH=str(SRC), PYTHONIOENCODING="utf-8")
-    return subprocess.run([sys.executable, "-m", "vex", "run", str(script)], capture_output=True, text=True, encoding="utf-8", env=env, timeout=20)
+    return subprocess.run(
+        [sys.executable, "-m", "vex", "run", str(script)],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        env=env,
+        timeout=20,
+    )
 
 
 def test_cli_display_of_a_cycle_exits_with_a_runtime_error(tmp_path: Path) -> None:
-    result = run_cli(tmp_path, NODE + "fn main() { let mut a = N { v: 1, next: None }; a.next = Some(a); print(a); }")
+    result = run_cli(
+        tmp_path, NODE + "fn main() { let mut a = N { v: 1, next: None }; a.next = Some(a); print(a); }"
+    )
     assert result.returncode == 2
     assert "contains itself" in result.stderr
     assert "cyc.vx:" in result.stderr
@@ -134,7 +151,7 @@ def test_cli_equality_of_cycles_exits_with_a_runtime_error(tmp_path: Path) -> No
 
 
 def test_cli_prints_a_deep_but_finite_value(tmp_path: Path) -> None:
-    src = "enum L { Nil, Cons(L) }\nfn main() { let mut a = Nil; for i in 0..100000 { a = Cons(a); } print(1); print(\"{a}\".len()); }"
+    src = 'enum L { Nil, Cons(L) }\nfn main() { let mut a = Nil; for i in 0..100000 { a = Cons(a); } print(1); print("{a}".len()); }'
     result = run_cli(tmp_path, src)
     assert result.returncode == 0, result.stderr
     assert result.stdout.split() == ["1", str(3 + 100000 * 5 + 100000)]
