@@ -245,3 +245,65 @@ def test_identifiers_may_still_contain_non_ascii_digits() -> None:
     toks, sink = lex("x² y٣")
     assert not sink.items
     assert [t.kind for t in toks[:-1]] == ["IDENT", "IDENT"]
+
+
+# ---------------------------------------------------------------- integer literals are 64-bit
+@pytest.mark.parametrize(
+    "text",
+    [
+        "9" * 20,
+        "9" * 4300,
+        "9" * 4301,
+        "9" * 100_000,
+        "1_" * 5000 + "1",
+        "0x" + "F" * 17,
+        "0x" + "F" * 100_000,
+        "0o" + "7" * 23,
+        "0b" + "1" * 65,
+    ],
+)
+def test_oversized_integer_literal_is_a_range_diagnostic(text: str) -> None:
+    code, line, col = single_error("  " + text)
+    assert (code, line, col) == ("int-literal-range", 1, 3)
+
+
+def test_range_diagnostic_does_not_echo_a_huge_literal() -> None:
+    _, sink = lex("9" * 100_000)
+    assert len(sink.items[0].message) < 200
+
+
+@pytest.mark.parametrize(
+    ("text", "value"),
+    [
+        ("0" * 5000, 0),
+        ("0" * 5000 + "7", 7),
+        ("0_" * 5000 + "7", 7),
+        ("0x" + "0" * 5000 + "F", 15),
+        ("0b" + "0" * 5000 + "1", 1),
+    ],
+)
+def test_leading_zeros_do_not_count_against_the_limit(text: str, value: int) -> None:
+    toks, sink = lex(text)
+    assert not sink.items
+    assert toks[0].kind == "INT" and toks[0].value == value
+
+
+@pytest.mark.parametrize(
+    ("text", "value"),
+    [
+        ("9223372036854775808", 2**63),  # the parser accepts this one only after unary minus
+        ("0x8000000000000000", 2**63),
+        ("0o1000000000000000000000", 2**63),
+        ("0b1" + "0" * 63, 2**63),
+    ],
+)
+def test_longest_literals_still_reach_the_parser(text: str, value: int) -> None:
+    toks, sink = lex(text)
+    assert not sink.items
+    assert toks[0].value == value
+
+
+def test_tuple_index_is_normalised() -> None:
+    toks, sink = lex("t." + "0" * 5000 + "1")
+    assert not sink.items
+    assert toks[2].kind == "INT" and toks[2].text == "1" and toks[2].value == 1

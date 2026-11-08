@@ -339,3 +339,42 @@ def test_repl_mode_accepts_statements_and_tail() -> None:
     mod = parse_source(Source("<r>", "let x = 1; x + 1"), sink, repl=True)
     assert not sink.items
     assert len(mod.stmts) == 1 and mod.tail is not None
+
+
+# ---------------------------------------------------------------- integer range
+def first_diag(src: str) -> tuple[str, int, int]:
+    _, sink = parse(src)
+    assert sink.items, "expected a diagnostic"
+    d = sink.items[0]
+    assert d.span is not None
+    return d.code, d.span.line, d.span.col
+
+
+@pytest.mark.parametrize("digits", ["9" * 20, "9" * 4301, "1" + "0" * 100_000])
+@pytest.mark.parametrize(
+    ("template", "col"),
+    [
+        ("fn main() {\n  let x = %s;\n}", 11),
+        ("fn main() {\n  let x = -%s;\n}", 12),
+        ("fn main() {\n  match 1 { %s => 1, _ => 2 };\n}", 13),
+        ("fn main() {\n  match 1 { -%s => 1, _ => 2 };\n}", 14),
+        ("fn main() {\n  let x = (1, 2).%s;\n}", 18),
+    ],
+)
+def test_oversized_integer_positions(digits: str, template: str, col: int) -> None:
+    assert first_diag(template % digits) == ("int-literal-range", 2, col)
+
+
+def test_int_min_literal_still_parses() -> None:
+    e = expr("-9223372036854775808")
+    assert isinstance(e, ast.IntLit) and e.value == -(2**63)
+
+
+def test_positive_int_min_magnitude_is_out_of_range() -> None:
+    assert first_diag("fn main() { 9223372036854775808 }") == ("int-literal-range", 1, 13)
+
+
+def test_nineteen_digit_overflow_with_leading_zeros_stays_short() -> None:
+    _, sink = parse("fn main() { " + "0" * 100_000 + "9999999999999999999 }")
+    assert [d.code for d in sink.items] == ["int-literal-range"]
+    assert len(sink.items[0].message) < 200

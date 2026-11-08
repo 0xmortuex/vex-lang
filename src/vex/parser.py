@@ -4,10 +4,7 @@ from __future__ import annotations
 
 from vex import syntax as ast
 from vex.diagnostics import DiagSink, Source, Span, suggest
-from vex.lexer import Token, tokenize
-
-INT_MAX = 2**63 - 1
-INT_MIN = -(2**63)
+from vex.lexer import INT_MAX, INT_MIN, INT_RANGE_HELP, INT_RANGE_LABEL, Token, int_range_message, tokenize
 
 BINARY_PREC = {
     "||": 1, "&&": 2,
@@ -609,9 +606,8 @@ class Parser:
             self.advance()
             assert isinstance(t.value, int)
             if t.value > INT_MAX:
-                self.sink.error("int-literal-range", f"integer literal `{t.text}` is out of range",
-                                self.span_of(t), "does not fit in a 64-bit Int",
-                                help=f"Int is a signed 64-bit integer ({INT_MIN} to {INT_MAX})")  # fmt: skip
+                self.sink.error("int-literal-range", int_range_message(t.text), self.span_of(t),
+                                INT_RANGE_LABEL, help=INT_RANGE_HELP)  # fmt: skip
                 return ast.IntLit(self.span_of(t), 0)
             return ast.IntLit(self.span_of(t), t.value)
         if k == "FLOAT":
@@ -884,7 +880,7 @@ class Parser:
             assert isinstance(t.value, int)
             v = -t.value if neg else t.value
             if v > INT_MAX or v < INT_MIN:
-                raise self.fail("int-literal-range", f"integer literal `{t.text}` is out of range", t)
+                raise self.fail("int-literal-range", int_range_message(t.text), t)
             return ast.IntLit(sp, v)
         if t.kind == "FLOAT":
             assert isinstance(t.value, float)

@@ -25,6 +25,19 @@ StrPart = str | tuple[int, int]
 DIGITS = "0123456789"
 BASE_DIGITS = {2: "01", 8: "01234567", 16: DIGITS + "abcdefABCDEF"}
 
+INT_MAX = 2**63 - 1
+INT_MIN = -(2**63)
+# Significant digits needed to write 2**63, the largest magnitude a literal can have (it is only valid
+# after unary minus). A literal with more digits is out of range and is never converted to a Python int.
+MAX_INT_DIGITS = {2: 64, 8: 22, 10: 19, 16: 16}
+INT_RANGE_LABEL = "does not fit in a 64-bit Int"
+INT_RANGE_HELP = f"Int is a signed 64-bit integer ({INT_MIN} to {INT_MAX})"
+
+
+def int_range_message(literal: str) -> str:
+    shown = literal if len(literal) <= 32 else f"{literal[:16]}...{literal[-8:]}"
+    return f"integer literal `{shown}` is out of range"
+
 ESCAPES = {"n": "\n", "t": "\t", "r": "\r", "0": "\0", "\\": "\\", '"': '"', "{": "{", "}": "}"}
 
 
@@ -120,7 +133,7 @@ class Lexer:
                 self.pos += 1
             raw = t[digits_start : self.pos].replace("_", "")
             if raw and all(c in BASE_DIGITS[base] for c in raw):
-                value = int(raw, base)
+                value = self._int_value(raw, base, start)
             else:
                 self.error("bad-number", f"invalid base-{base} integer literal", start, self.pos,
                            "not a valid number")  # fmt: skip
@@ -163,7 +176,17 @@ class Lexer:
         if is_float:
             self.tokens.append(Token("FLOAT", raw, start, self.pos, float(raw)))
         else:
-            self.tokens.append(Token("INT", raw, start, self.pos, int(raw)))
+            value = self._int_value(raw, 10, start)
+            # After a dot this is a tuple index, which later stages read back from the token text.
+            self.tokens.append(Token("INT", str(value) if after_dot else raw, start, self.pos, value))
+
+    def _int_value(self, digits: str, base: int, start: int) -> int:
+        significant = digits.lstrip("0")
+        if len(significant) > MAX_INT_DIGITS[base]:
+            self.error("int-literal-range", int_range_message(self.text[start : self.pos]), start, self.pos,
+                       INT_RANGE_LABEL, INT_RANGE_HELP)  # fmt: skip
+            return 0
+        return int(significant or "0", base)
 
     def _punct(self) -> None:
         t = self.text
