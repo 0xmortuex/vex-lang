@@ -31,6 +31,8 @@ The host must link against the CPython library for **one exact minor version** a
 
 CPython 3.13 on Windows x86-64 is the only tested combination. Linux and macOS use the same design with a different link flag.
 
+The host imports exactly three symbols from libpython: `Py_Initialize`, `PyRun_SimpleString` and `Py_FinalizeEx`.
+
 Bootstrap: allocate a zeroed `VexApi`, write `abi_version = 1` and `ready = 0`, then run
 `import vex.embed; vex.embed.attach(<decimal address of the table>)` with `PyRun_SimpleString`. `attach` writes every function
 pointer and sets `ready` to 1 **last**. If `ready` is still 0, the table must not be used: either Python printed a traceback to
@@ -134,6 +136,17 @@ Every call taking `vm` returns status 3 for a null, unknown or closed instance, 
 
 A script cannot import other files: the host supplies all its text. An `import` is a compile error.
 
+## Lifecycle: start and stop
+
+`Py_FinalizeEx` destroys the interpreter that owns every table pointer, so **no table entry may be called after it**. Doing so
+through a raw table entry crashes the process, because nothing can catch it on the Vex side. Mort hosts get protection from
+`vex.mx`: `vex.stop()` clears `ready`, and from then on every `vex.*` wrapper returns status 3 (`open` returns null,
+`error` returns a fixed message, `close`, `fail` and `return_str` do nothing). `vex.stop()` returns false if the
+runtime is not running. CPython cannot be restarted in the same process reliably, so `vex.start()` after `vex.stop()` returns a
+table whose `ready` is 0.
+
+A C host calling the table directly must clear its own copy of the pointers before calling `Py_FinalizeEx`.
+
 ## Status codes
 
 | Status | Meaning | `error(vm)` |
@@ -144,8 +157,15 @@ A script cannot import other files: the host supplies all its text. An `import` 
 | 3 | Binding error: bad handle, unknown function, wrong arity or tag, invalid UTF-8, bad signature, unknown capability | `binding error: ...` |
 | 4 | Budget exhausted | The rendered stack trace, with `file:line:col` |
 
-Scripts cannot catch these. No exception or crash crosses the boundary: every entry point catches `BaseException` and returns a
-status (a failed `open` returns null). The instance stays usable after any failure.
+Scripts cannot catch these. No exception or crash crosses the boundary: every entry point catches `BaseException`, including
+any raised while it reports another failure, and returns a status (a failed `open` returns null, `error` always returns a valid
+string). The instance stays usable after any failure. Status 2 and 4 messages always name a script location.
+
+The guarantee needs Python stack headroom when native code calls in, because `ctypes` drops a callback that fails on entry and
+returns garbage. Depth limits (below) provide that headroom at every callback, on the default recursion limit of 1000. Python's default SIGINT
+handler would raise at any bytecode, so `attach` restores the default signal action unless the host installed its own handler.
+One failure cannot be converted, by design: if CPython itself cannot allocate memory at the moment a callback is entered, it
+reports that to stderr and the return value is undefined. The whole process is out of memory at that point.
 
 ### Failing from a host function
 
@@ -178,9 +198,18 @@ Python's stdout is flushed after each `call` on an instance with bit 1. The host
 ## Execution budget
 
 A call may spend a fixed number of units; the default is 10,000,000. One unit is charged per function entry and loop back-edge.
-Builtins that create data charge in proportion to the size they create (one unit per character or element): `repeat`,
-`replace`, `join`, `concat`, `extend`, range materialisation, `+` on `Str`, interpolation, and copies such as `copy`, `split`,
-`sorted`. The budget resets at each outermost `call`. When it runs out, the script stops with status 4 at its current location.
+
+Work whose cost scales with data is charged while it happens, one unit per character or element touched, so a script cannot spend
+time or memory ahead of its budget:
+
+- `==` and `!=` on strings, lists, tuples, maps and enums; `<`, `<=`, `>`, `>=` on strings and sequences. `==` walks values
+  without recursion, so depth is limited only by the budget.
+- Formatting: `print`, `eprint`, interpolation, and the text of `assert_eq`, `unwrap`, `expect` and `unwrap_err`.
+- Builtins that read or build strings and collections, including `contains`, `index_of`, `sort`, `sorted`, `reverse`, `insert`,
+  `remove_at`, `sum`, `repeat`, `replace`, `join`, `split`, `concat`, `copy`, range materialisation and `Map.keys`.
+- `+` on `Str`.
+
+The budget resets at each outermost `call`. When it runs out, the script stops with status 4 at its current location.
 
 The budget has no hard memory cap in version 1.
 
@@ -190,8 +219,17 @@ Everything runs on one OS thread: the thread that ran `Py_Initialize`, which kee
 is unsupported.
 
 A `HostFn` may call back into `call` on the same thread (native to Vex to native to Vex). Re-entry shares the outer call's budget, and the
-outer call reports a budget stop as status 4 even if the `HostFn` reports a failure of its own. Nesting is limited to 32 levels; deeper
-calls fail with status 2. `load` and `close` should not be called during a running `call` on the same instance.
+outer call reports a budget stop as status 4 even if the `HostFn` reports a failure of its own. `load` and `close` should not be called
+during a running `call` on the same instance.
+
+Two limits apply to the **whole process**, across every instance, and a deeper call fails with status 2 at a script location:
+
+| Limit | Value | Bounds |
+|-------|------:|--------|
+| Calls into Vex nested through host functions | 32 | Native stack: measured 1 MiB safe to 142 hops, on Windows x86-64 |
+| Builtins calling back into Vex (`map` inside `map`) | 100 | Python recursion, keeping callback headroom |
+
+Ordinary Vex-to-Vex recursion is not limited by these; it uses a heap-allocated frame stack limited to 100,000 frames.
 
 ## Versioning
 
@@ -201,7 +239,9 @@ calls fail with status 2. `load` and `close` should not be called during a runni
 
 Add it to a build with `--package vex=embed/mort/vex.mx --link <libpython>`.
 
-- `vex.start() -> *VexApi` and `vex.stop() -> bool`.
+- `vex.start() -> *VexApi` and `vex.stop() -> bool` (see [Lifecycle](#lifecycle-start-and-stop)).
+- Text helpers `vex.write_text`, `write_decimal` and `write_i64` build a line in a `[]u8`. They stop at the end of the buffer rather
+  than trapping, so text from a script can never overrun it.
 - One wrapper per table entry, for example `vex.call(api, vm, name, argv, argc, ret)`. Mort can call a function value only through
   a named binding, so the wrappers keep host code to one line per call.
 - Constructors `vex.of_unit`, `of_int`, `of_float`, `of_bool`, `of_str`, `of_cstr`.
