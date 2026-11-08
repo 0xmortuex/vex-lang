@@ -452,8 +452,12 @@ method("Result", "and_then", "[T, E, U](Result[T, E], fn(T) -> Result[U, E]) -> 
        lambda vm, r, f: r if r.tag == 1 else vm.call(f, [r.f[0]]), needs_vm=True)  # fmt: skip
 
 # ------------------------------------------------------------------ Range
+def _range_len(r: range) -> int:
+    return checked(max(r.stop - r.start, 0), "len")  # len(r) raises OverflowError past sys.maxsize
+
+
 method("Range", "to_list", "(Range) -> List[Int]", list)
-method("Range", "len", "(Range) -> Int", len)
+method("Range", "len", "(Range) -> Int", _range_len)
 method("Range", "contains", "(Range, Int) -> Bool", lambda r, x: x in r)
 
 
@@ -480,7 +484,7 @@ def _mpow(a: float, b: float) -> float:
 
 
 def _gcd(a: int, b: int) -> int:
-    return math.gcd(a, b)
+    return checked(math.gcd(a, b), "gcd")
 
 
 def _ln(x: float) -> float:

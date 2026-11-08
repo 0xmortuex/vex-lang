@@ -137,7 +137,7 @@ def display(v: Any, top: bool = True) -> str:
     if t is dict:
         return "{" + ", ".join(f"{display(k, False)}: {display(x, False)}" for k, x in v.items()) + "}"
     if t is range:
-        return f"{v.start}..{v.stop}"
+        return f"{v.start}..={v.stop - 1}" if v.stop > INT_MAX else f"{v.start}..{v.stop}"
     if t is Adt:
         info: AdtInfo = v.info
         name: str = info.variants[v.tag]

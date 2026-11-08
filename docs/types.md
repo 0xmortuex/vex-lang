@@ -136,7 +136,7 @@ by earlier unguarded arms produces an `unreachable-pattern` **warning**.
 
 ## Integers and floats
 
-`Int` is a signed 64-bit integer. **Every** `+ - * /`, unary `-`, `abs`, `pow`, `sum` whose true result
+`Int` is a signed 64-bit integer. **Every** `+ - * /`, unary `-`, `abs`, `pow`, `sum`, `math.gcd`, `Range.len` whose true result
 is outside `-9223372036854775808 … 9223372036854775807` stops the program with
 `integer overflow in <op>` (no wraparound, no saturation, no silent bignum). `/` truncates toward zero,
 `%` takes the sign of the dividend (`-7 / 2 == -3`, `-7 % 3 == -1`), and division or remainder by zero is

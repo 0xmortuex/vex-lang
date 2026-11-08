@@ -76,7 +76,7 @@ A short example, `fn add(a: Int, b: Int) -> Int { a + b }`:
 ## Integer semantics (the contract)
 
 * `Int` is 64-bit two's complement range, `-2^63 … 2^63 - 1`.
-* `+ - *`, unary `-` and the library functions `abs`, `pow`, `sum` are **checked**: a result outside the
+* `+ - *`, unary `-` and the library functions `abs`, `pow`, `sum`, `gcd`, `Range.len` are **checked**: a result outside the
   range raises the runtime error ``integer overflow in `op` ``. There is no wraparound mode.
 * `/` truncates toward zero; `%` has the sign of the left operand; `x / 0` and `x % 0` raise
   `division by zero`; `MIN / -1` raises ``integer overflow in `/` ``.
