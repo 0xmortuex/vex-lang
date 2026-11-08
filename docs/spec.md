@@ -149,7 +149,7 @@ escape         = unicode_escape | "\\" simple_escape ;
 simple_escape  = "n" | "t" | "r" | "0" | "\\" | '"' | "{" | "}" ;
 unicode_escape = "\\u{" hex_digit { hex_digit } "}" ;
 interpolation  = "{" interp_text "}" ;
-interp_text    = { nested_string | "{" interp_text "}" | !( "{" | "}" | '"' ) any } ;
+interp_text    = { nested_string | "{" interp_text "}" | !"}" any } ;
 nested_string  = '"' { "\\" any | !'"' any } '"' ;
 string_char    = !( '"' | "\\" | "{" | surrogate ) any ;
 ```

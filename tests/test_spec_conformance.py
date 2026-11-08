@@ -413,12 +413,15 @@ def _digits_fit(body: str, base: int) -> bool:
 
 
 def _unicode_escape_valid(text: str) -> bool:
-    return lexer_module._code_point(text[3:-1]) is not None
+    digits = text[3:-1]  # the grammar, not this check, requires at least one digit
+    return not digits or lexer_module._code_point(digits) is not None
 
 
 def _float_finite(text: str) -> bool:
-    body = text.replace("_", "")
-    return float(body) != float("inf")
+    try:
+        return float(text.replace("_", "")) != float("inf")
+    except ValueError:  # only a deliberately narrowed grammar can match something that is not a float
+        return True
 
 
 _LEXICAL_RANGE_CHECKS: dict[str, Callable[[str], bool]] = {
@@ -808,7 +811,7 @@ NEGATIVE_SAMPLES: dict[str, list[str]] = {
     "block": ["fn m() {", "fn m() }", "fn m() { fn g() {} }", "fn m() { struct S {} }"],
     "block_entry": [fn_body("import a;"), fn_body("=;"), fn_body("impl S {}")],
     "let_stmt": [fn_body("let;"), fn_body("let x;"), fn_body("let x = 1"), fn_body("let x: = 1;"), fn_body("1 + let x = 2;")],
-    "block_led": [fn_body("if a {} + 1;"), fn_body("{} .. 1;"), fn_body("while a {} * 2;")],
+    "block_led": [fn_body("{} [1] = 2;"), fn_body("{} (1) = 2;"), fn_body("if a {} + 1;"), fn_body("{} .. 1;"), fn_body("while a {} * 2;")],
     "led_tail": [fn_body("{}.a .. 1;"), fn_body("{}.f() = 1;"), fn_body("{}? = 1;"), fn_body("{}.a + b = 1;")],
     "expr_stmt": [fn_body("1 2;"), fn_body("x = 1 = 2;"), fn_body("a b")],
     "stmt_end": [fn_body("a b;"), fn_body("x = 1 y;"), fn_body("{}.a b;")],
@@ -864,7 +867,7 @@ NEGATIVE_SAMPLES: dict[str, list[str]] = {
         fn_body("match a { S { .., b } => 1 }"),
         fn_body("match a { s { b } => 1 }"),
     ],
-    "pat_field": [fn_body("match a { S { 1 } => 1 }"), fn_body("match a { S { b: } => 1 }"), fn_body("match a { S { mut b } => 1 }")],
+    "pat_field": [fn_body("match a { S { b c } => 1 }"), fn_body("match a { S { 1 } => 1 }"), fn_body("match a { S { b: } => 1 }"), fn_body("match a { S { mut b } => 1 }")],
     "pat_tuple": [fn_body("match a { ( => 1 }"), fn_body("match a { (,) => 1 }"), fn_body("match a { (b c) => 1 }")],
     "pat_list": [fn_body("match a { A(b,,) => 1 }"), fn_body("match a { (b,,c) => 1 }")],
     "pat_literal": [fn_body("match a { - => 1 }"), fn_body("match a { -true => 1 }"), fn_body('match a { "{b}" => 1 }'), fn_body("match a { -b => 1 }")],
@@ -872,7 +875,7 @@ NEGATIVE_SAMPLES: dict[str, list[str]] = {
     "let_pat_atom": [fn_body("let + = 1;"), fn_body("let mut = 1;"), fn_body("let mut 1 = 1;"), fn_body("let _ . b = 1;")],
     "let_pat_ctor": [fn_body("let A( = 1;"), fn_body("let A(,) = 1;"), fn_body("let a(b) = 1;")],
     "let_pat_struct": [fn_body("let A.b { c } = 1;"), fn_body("let S { = 1;"), fn_body("let S { a .. } = 1;"), fn_body("let S { a, .., } = 1;")],
-    "let_pat_field": [fn_body("let S { mut a } = 1;"), fn_body("let S { a: } = 1;"), fn_body("let S { 1 } = 1;")],
+    "let_pat_field": [fn_body("let S { a b } = 1;"), fn_body("let S { mut a } = 1;"), fn_body("let S { a: } = 1;"), fn_body("let S { 1 } = 1;")],
     "let_pat_tuple": [fn_body("let ( = 1;"), fn_body("let (,) = 1;"), fn_body("let (a b) = 1;")],
     "let_pat_list": [fn_body("let (a,,b) = 1;"), fn_body("let A(a,,) = 1;")],
     "interp": ['fn m() { "{}"; }', 'fn m() { "{1 2}"; }', 'fn m() { "{let}"; }', 'fn m() { "{ }"; }'],
@@ -1039,7 +1042,7 @@ LEXER_ORACLES: dict[str, Callable[[str], bool]] = {
 }
 
 LEXICAL_NEGATIVES: dict[str, list[str]] = {
-    "trivia": ["/*", "/* /* */", "\x0c", "/ /"],
+    "trivia": ["/*", "/* /* */", "\x0c", "/ /", "// c\nx", "/*/*/"],
     "whitespace": ["\x0b", "\xa0"],
     "bom": ["\ufffe"],
     "line_comment": ["/x"],
@@ -1049,7 +1052,7 @@ LEXICAL_NEGATIVES: dict[str, list[str]] = {
     "keyword_word": ["trait"],
     "ident_start": ["1", "²", "-"],
     "ident_part": ["-", " "],
-    "INT": ["", "1a", "0x", "1_a"],
+    "INT": ["", "1a", "0x", "1_a", "0x_", "0o_", "0b_"],
     "radix_int": ["0x", "0xg", "0b2", "0o8", "0x_"],
     "hex_int": ["0xg", "0x_"],
     "oct_int": ["0o8", "0o_"],
@@ -1062,7 +1065,7 @@ LEXICAL_NEGATIVES: dict[str, list[str]] = {
     "FLOAT": ["1.", ".5", "1e", "1.5e", "1e400", "1e5_", "1.5x", "1"],
     "fraction": ["1.a", "1.-5"],
     "exponent": ["1e+", "1e_5", "1ex"],
-    "STRING": ['"', '"a', '"\\q"', '"{"', '"{a', '"\\'],
+    "STRING": ['"', '"a', '"\\q"', '"{"', '"{a', '"\\', '"\\u{}"', '"\\u{41"', '"{{}"', '"{"a}', '"\ud800"'],
     "escape": ['"\\a"', '"\\x41"', '"\\'],
     "simple_escape": ['"\\e"'],
     "unicode_escape": ['"\\u{}"', '"\\u{D800}"', '"\\u{110000}"', '"\\u41"', '"\\u{g}"', '"\\u{41"'],
@@ -1249,21 +1252,35 @@ def narrowed_grammars(rules: Rules) -> Iterator[tuple[str, Rules]]:
 
 def undetected_narrowings() -> list[str]:
     forms = accepted_forms()
+    for start, text in forms:  # a form the grammar already rejects would make every narrowing look detected
+        assert grammar_accepts(text, start), f"the spec's grammar rejects {text!r}"
     negative = [
         ("repl_input", s.removeprefix(REPL_MARK)) if s.startswith(REPL_MARK) else ("module", s)
         for s in all_negative_texts()
     ]
-    programs = [t for _, t in repository_programs() if parser_accepts(t)] + spec_code_blocks()
+    programs = [t for t in [*(s for _, s in repository_programs()), *spec_code_blocks()] if parser_accepts(t)]
     missed: list[str] = []
     for what, rules in narrowed_grammars(syntax_rules()):
-        if any(grammar_events(text, start, rules=rules) is None for start, text in forms):
-            continue
-        if any(grammar_events(text, start, rules=rules) is not None for start, text in negative):
-            continue
-        if any(grammar_events(text, "module", rules=rules) is None for text in programs if parser_accepts(text)):
+        try:
+            if any(grammar_events(text, start, rules=rules) is None for start, text in forms):
+                continue
+            if any(grammar_events(text, start, rules=rules) is not None for start, text in negative):
+                continue
+            if any(grammar_events(text, "module", rules=rules) is None for text in programs):
+                continue
+        except RecursionError:  # dropping a prefix can leave a left-recursive rule, which no longer parses anything
             continue
         missed.append(what)
     return missed
+
+
+# Changes that cannot alter what the grammar accepts. A stale entry fails the tests below.
+EQUIVALENT_SYNTAX = {
+    "led_tail: branch 1: drop item 0": "`&( . | ? )` before led_tail guarantees a suffix, so `{ suffix }` matches the same",
+}
+EQUIVALENT_LEXICAL = {
+    "interpolation: drop item 2": "without the `}`, interp_text stops at it and it is then read as an ordinary string character",
+}
 
 
 def test_every_narrowing_of_the_syntax_is_detected() -> None:
@@ -1273,24 +1290,32 @@ def test_every_narrowing_of_the_syntax_is_detected() -> None:
         missed = undetected_narrowings()
     finally:
         sys.setrecursionlimit(limit)
-    assert not missed, f"{len(missed)} changes to the grammar go unnoticed: {missed}"
+    assert set(missed) == set(EQUIVALENT_SYNTAX), f"{len(missed)} changes to the grammar go unnoticed: {missed}"
 
 
 LEXICAL_FORMS: dict[str, list[str]] = {
-    "trivia": ["", " \t\r\n", "// c", "// c\n", "/* c */", "/* /* n */ */", "\ufeff", "/* * / */", " /**/ // x\n"],
+    "trivia": ["", " \t\r\n", "//", "// c", "// c\n", "/* c */", "/* /* n */ */", "\ufeff", "/* * / */", " /**/ // x\n"],
     "IDENT": ["a", "_", "a1", "é", "letx", "_1", "a_b", "日本"],
     "keyword": sorted(KEYWORDS),
     "PUNCT": list(PUNCT),
     "INT": [
-        "0", "7", "1_000", "1_", "0x1F", "0XaF", "0x_1", "0x1_F", "0o7", "0O7", "0o_7", "0o1_7", "0b1", "0B0", "0b_1", "0b1_0",
+        "0", "7", "1_000", "1_", "0x1F", "0XaF", "0x_1", "0x1_F", "0o7", "0O7", "0o_7", "0o1_7", "0b1", "0B0", "0b_1", "0b1_0", "0x__1", "0o__7", "0b__1",
         "0123456789", "0x0123456789abcdefABCDEF"[:18], "0o01234567", "0xabcdef", "0xABCDEF",
     ],
-    "FLOAT": ["1.5", "1.5e3", "1e3", "1E3", "1e+3", "1e-3", "1_0.5_0", "1_0e3", "1.5E-2", "0.0123456789"],
+    "FLOAT": ["1.5", "1.5e3", "1e3", "1E3", "1e+3", "1e-3", "1e10", "1e100", "1_0.5_0", "1_0e3", "1.5E-2", "0.0123456789"],
     "STRING": [
         '""', '"a"', '"a\nb"', '"}"', '"é"', '"\\n"', '"\\t"', '"\\r"', '"\\0"', '"\\\\"', '"\\""', '"\\{"', '"\\}"', '"\\u{41}"',
-        '"\\u{10FFFF}"', '"{a}"', '"{ {} }"', '"{"s"}"', '"{"\\""}"', '"a{b}c{d}"',
+        '"\\u{A}"', '"\\u{10FFFF}"', '"{a}"', '"{ {} }"', '"{ {a} }"', '"{ {a} \\q }"', '"{"a}"}"', '"{"}"}"', '"{"s"}"', '"{""}"', '"{"ab"}"', '"{"\\""}"', '"a{b}c{d}"',
     ],
 }
+
+
+# A number directly followed by a letter or `_` is `bad-number`: the rule must not match even a prefix of these.
+NO_PREFIX_MATCH: list[tuple[str, str]] = [("INT", "1a"), ("INT", "1_a"), ("INT", "0x1g"), ("FLOAT", "1.5x"), ("FLOAT", "1e5_")]
+
+
+def matches_a_prefix(rule: str, text: str, rules: Rules | None = None) -> bool:
+    return CharMatcher(text, None, rules).match_ref(rule, 0) >= 0
 
 
 def undetected_lexical_narrowings() -> list[str]:
@@ -1299,11 +1324,19 @@ def undetected_lexical_narrowings() -> list[str]:
         assert LEXER_ORACLES[rule](text), f"the lexer rejects {text!r} as {rule}"
         assert char_full_match(rule, text), f"the spec's lexical grammar rejects {text!r} as {rule}"
     negative = [(r, s) for r, s in lexical_negatives() if r in LEXER_ORACLES]
+    for rule, text in NO_PREFIX_MATCH:
+        assert not lex_clean(text)[1], f"the lexer accepts {text!r}"
+        assert not matches_a_prefix(rule, text), f"{rule} matches a prefix of {text!r}"
     missed: list[str] = []
     for what, rules in narrowed_grammars(lexical_rules()):
-        if any(not char_full_match(r, s, rules=rules) for r, s in forms):
-            continue
-        if any(char_full_match(r, s, rules=rules) for r, s in negative):
+        try:
+            if any(not char_full_match(r, s, rules=rules) for r, s in forms):
+                continue
+            if any(char_full_match(r, s, rules=rules) for r, s in negative):
+                continue
+            if any(matches_a_prefix(r, s, rules) for r, s in NO_PREFIX_MATCH):
+                continue
+        except RecursionError:
             continue
         missed.append(what)
     return missed
@@ -1311,7 +1344,7 @@ def undetected_lexical_narrowings() -> list[str]:
 
 def test_every_narrowing_of_the_lexical_grammar_is_detected() -> None:
     missed = undetected_lexical_narrowings()
-    assert not missed, f"{len(missed)} changes to the lexical grammar go unnoticed: {missed}"
+    assert set(missed) == set(EQUIVALENT_LEXICAL), f"{len(missed)} changes to the lexical grammar go unnoticed: {missed}"
 
 
 # ------------------------------------------------------------------ rules that depend on token values or context
