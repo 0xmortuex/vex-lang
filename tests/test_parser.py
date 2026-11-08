@@ -378,3 +378,31 @@ def test_nineteen_digit_overflow_with_leading_zeros_stays_short() -> None:
     _, sink = parse("fn main() { " + "0" * 100_000 + "9999999999999999999 }")
     assert [d.code for d in sink.items] == ["int-literal-range"]
     assert len(sink.items[0].message) < 200
+
+
+# ---------------------------------------------------------------- recursion limits
+DEEP = 20_000
+
+
+@pytest.mark.parametrize(
+    "src",
+    [
+        "fn main() {\n" + "{" * DEEP,
+        "fn main() {\n" + "if true { " * DEEP,
+        "fn main() {\n" + "while true { " * DEEP,
+        "fn main() {\n" + "for x in y { " * DEEP,
+        "fn main() {\nlet x = " + "if " * DEEP,
+        "fn main() {\nlet x = " + "match " * DEEP,
+        "fn main() {\nif true {} " + "else if true {} " * DEEP,
+        "fn main() {\nlet x = " + "{ " * DEEP,
+        "fn main() {\n" + "match x { _ => " * DEEP,
+    ],
+    ids=["brace", "if", "while", "for", "if-cond", "match-cond", "else-if", "expr-block", "match-arm"],
+)
+def test_runaway_nesting_reports_where_it_happened(src: str) -> None:
+    _, sink = parse(src)
+    deep = [d for d in sink.items if d.code == "too-deep"]
+    assert deep, [d.code for d in sink.items]
+    assert deep[0].span is not None
+    assert deep[0].span.line >= 2, "the position must be in the nested code, not the start of the file"
+    deep[0].render()

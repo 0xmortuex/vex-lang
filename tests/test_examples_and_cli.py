@@ -217,3 +217,12 @@ def test_printing_and_comparing_deeply_nested_values(tmp_path: pathlib.Path) -> 
 def test_disassembly_names_builtins_without_underscores() -> None:
     res = vex("disasm", str(ROOT / "examples" / "hello.vx"))
     assert "print/1" in res.stdout and "_print" not in res.stdout
+
+
+def test_cli_reports_runaway_nesting_on_the_big_stack(tmp_path: pathlib.Path) -> None:
+    path = tmp_path / "deep.vx"
+    path.write_text("fn main() {\n" + "{" * 100_000, encoding="utf-8")
+    proc = vex("check", str(path))
+    assert proc.returncode == 1, proc.stderr[-500:]
+    assert "too-deep" in proc.stderr
+    assert "internal compiler error" not in proc.stderr

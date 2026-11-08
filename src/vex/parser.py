@@ -895,10 +895,12 @@ def ast_keywords() -> frozenset[str]:
 
 
 def parse_source(source: Source, sink: DiagSink, repl: bool = False) -> ast.Module:
+    parser = Parser(source, sink)
     try:
-        return Parser(source, sink).parse_module(source.path, repl=repl)
+        return parser.parse_module(source.path, repl=repl)
     except RecursionError:
-        sink.error("too-deep", "program is nested too deeply to parse", Span(source, 0, 1))
+        sink.error("too-deep", "program is nested too deeply to parse", parser.span_of(parser.tok),
+                   "the nesting goes too deep here")  # fmt: skip
         return ast.Module(source.path, [])
 
 
