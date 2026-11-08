@@ -14,6 +14,7 @@ So a rule that changes in only the spec, or only the parser, fails here.
 from __future__ import annotations
 
 import io
+import json
 import pathlib
 import random
 import re
@@ -1345,6 +1346,127 @@ def undetected_lexical_narrowings() -> list[str]:
 def test_every_narrowing_of_the_lexical_grammar_is_detected() -> None:
     missed = undetected_lexical_narrowings()
     assert set(missed) == set(EQUIVALENT_LEXICAL), f"{len(missed)} changes to the lexical grammar go unnoticed: {missed}"
+
+
+# ------------------------------------------------------------------ narrowing one call site
+# The narrowings above change a rule's own shape. These restrict what one reference may expand to: the rule that was
+# referenced is untouched, so only a sentence using that alternative at that place can notice. The sentences come from
+# CALL_SITE_CORPUS, which is frozen in the repository: anything generated from the spec during the test would narrow too.
+CALL_SITE_CORPUS = ROOT / "tests" / "spec_call_site_corpus.jsonl"
+
+
+@cache
+def call_site_corpus() -> tuple[tuple[str, str, str], ...]:
+    """(grammar, start rule, sentence) for each line of the corpus."""
+    out: list[tuple[str, str, str]] = []
+    for line in CALL_SITE_CORPUS.read_text(encoding="utf-8").splitlines():
+        grammar, start, text = json.loads(line)
+        out.append((grammar, start, text))
+    return tuple(out)
+
+
+def _syntax_evidence() -> tuple[list[tuple[str, str]], list[tuple[str, str]], list[str]]:
+    """What a narrowed syntax is held to: the accepted forms, the negative samples, and the parseable programs."""
+    negative = [
+        ("repl_input", s.removeprefix(REPL_MARK)) if s.startswith(REPL_MARK) else ("module", s)
+        for s in all_negative_texts()
+    ]
+    programs = [t for t in [*(s for _, s in repository_programs()), *spec_code_blocks()] if parser_accepts(t)]
+    return accepted_forms(), negative, programs
+
+
+def syntax_narrowing_detected(rules: Rules) -> bool:
+    """Does the grammar ``rules`` differ from the parser on anything the tests hold it to?"""
+    forms, negative, programs = _syntax_evidence()
+    limit = sys.getrecursionlimit()
+    sys.setrecursionlimit(max(limit, 6000))
+    try:
+        return (
+            any(grammar_events(text, start, rules=rules) is None for start, text in forms)
+            or any(grammar_events(text, start, rules=rules) is not None for start, text in negative)
+            or any(grammar_events(text, "module", rules=rules) is None for text in programs)
+            or any(grammar_events(text, start, rules=rules) is None for g, start, text in call_site_corpus() if g == "syntax")
+        )
+    except RecursionError:  # as in undetected_narrowings: a left-recursive rule no longer parses anything
+        return True
+    finally:
+        sys.setrecursionlimit(limit)
+
+
+def lexical_narrowing_detected(rules: Rules) -> bool:
+    forms = [(rule, text) for rule, texts in LEXICAL_FORMS.items() for text in texts]
+    negative = [(r, s) for r, s in lexical_negatives() if r in LEXER_ORACLES]
+    return (
+        any(not char_full_match(r, s, rules=rules) for r, s in forms)
+        or any(char_full_match(r, s, rules=rules) for r, s in negative)
+        or any(matches_a_prefix(r, s, rules) for r, s in NO_PREFIX_MATCH)
+        or any(not char_full_match(start, text, rules=rules) for g, start, text in call_site_corpus() if g == "lexical")
+    )
+
+
+@dataclass(frozen=True)
+class SiteNarrowing:
+    name: str
+    grammar: str  # "syntax" | "lexical"
+    old: str
+    new: str
+    start: str
+    witness: str  # accepted by the parser, lost by the narrowed grammar
+
+
+COND_ATOM_WITHOUT_LAMBDA = (
+    'cond_primary = "return" cond | cond_atom ;\n'
+    'cond_atom    = INT | FLOAT | STRING | "true" | "false" | IDENT | paren | list_lit | map_lit | blocklike | "break" | "continue" ;'
+)
+BLOCK_COMMENT_NESTING_ONCE = (
+    'block_comment  = "/*" { flat_comment | !( "*/" | "/*" ) any } "*/" ;\n'
+    'flat_comment   = "/*" { !( "*/" | "/*" ) any } "*/" ;'
+)
+
+SITE_NARROWINGS: list[SiteNarrowing] = [
+    # Found by review: each lost the range form, or the or-pattern, at one place, and nothing noticed.
+    SiteNarrowing("map-key", "syntax", 'map_entry    = expr ":" expr ;', 'map_entry    = binary ":" expr ;', "module", "fn m() { #{a..b: c}; }"),
+    SiteNarrowing("interpolation", "syntax", "interp       = expr EOF ;", "interp       = binary EOF ;", "module", 'fn m() { "{a..b}"; }'),
+    SiteNarrowing("field-value", "syntax", 'field_init   = IDENT [ ":" expr ] ;', 'field_init   = IDENT [ ":" binary ] ;', "module", "fn m() { S { a: b..c }; }"),
+    SiteNarrowing("lambda-body", "syntax", '"->" type block | expr ) ;', '"->" type block | binary ) ;', "module", "fn m() { a..|| b..c; }"),
+    SiteNarrowing("guard", "syntax", 'arm          = pattern [ "if" cond ]', 'arm          = pattern [ "if" cond_binary ]', "module", "fn m() { match a { _ if b..c => 1 } }"),
+    SiteNarrowing("return", "syntax", 'return_expr  = "return" ( &return_end | expr ) ;', 'return_expr  = "return" ( &return_end | binary ) ;', "module", "fn m() { a..return b..c; }"),
+    SiteNarrowing("place-index", "syntax", 'place_suffix = "." ( IDENT | INT ) | "[" expr "]" ;', 'place_suffix = "." ( IDENT | INT ) | "[" binary "]" ;', "module", "fn m() { a[b..c] = 1; }"),
+    SiteNarrowing("pat-field", "syntax", 'pat_field    = IDENT [ ":" pattern ] ;', 'pat_field    = IDENT [ ":" pat_atom ] ;', "module", "fn m() { match a { S { b: c | d } => 1 } }"),
+    # Chosen to probe the mechanism: one occurrence among several, an alternative of a referenced rule, recursion, lexing.
+    SiteNarrowing("place-head-struct", "syntax", "place        = primary { suffix &suffix } place_suffix", "place        = atom { suffix &suffix } place_suffix", "module", "fn m() { S { a: 1 }.b = 2; }"),
+    SiteNarrowing("cond-lambda", "syntax", 'cond_primary = "return" cond | atom ;', COND_ATOM_WITHOUT_LAMBDA, "module", "fn m() { if || a {} }"),
+    SiteNarrowing("expr-list-later", "syntax", 'expr_list    = expr { "," expr } [ "," ] ;', 'expr_list    = expr { "," binary } [ "," ] ;', "module", "fn m() { [a, b..c]; }"),
+    SiteNarrowing("map-value", "syntax", 'map_entry    = expr ":" expr ;', 'map_entry    = expr ":" binary ;', "module", "fn m() { #{a: b..c}; }"),
+    SiteNarrowing("arm-body", "syntax", '| expr ( "," | &"}" ) ) ;', '| binary ( "," | &"}" ) ) ;', "module", "fn m() { match a { _ => b..c, } }"),
+    SiteNarrowing("pat-list-later", "syntax", 'pat_list     = pattern { "," pattern } [ "," ] ;', 'pat_list     = pattern { "," pat_atom } [ "," ] ;', "module", "fn m() { match a { (b, c | d) => 1 } }"),
+    SiteNarrowing("let-pat-field", "syntax", 'let_pat_field  = IDENT [ ":" let_pattern ] ;', 'let_pat_field  = IDENT [ ":" let_pat_atom ] ;', "module", "fn m() { let S { a: b | c } = 1; }"),
+    SiteNarrowing("match-scrutinee", "syntax", 'match_expr   = "match" cond "{"', 'match_expr   = "match" cond_binary "{"', "module", "fn m() { match a..b { _ => 1 } }"),
+    SiteNarrowing("bin-digit-later", "lexical", '{ "_" } bin_digit { bin_digit | "_" } ;', '{ "_" } bin_digit { "0" | "_" } ;', "INT", "0b11"),
+    SiteNarrowing("block-comment-depth", "lexical", 'block_comment  = "/*" { block_comment | !( "*/" | "/*" ) any } "*/" ;', BLOCK_COMMENT_NESTING_ONCE, "trivia", "/* /* /* x */ */ */"),
+]
+
+
+def narrowed_rules(case: SiteNarrowing) -> Rules:
+    text = "\n".join(ebnf_blocks(case.grammar))
+    assert text.count(case.old) == 1, f"{case.name}: the spec does not contain {case.old!r} exactly once"
+    return EbnfReader(text.replace(case.old, case.new), 0).rules()
+
+
+@pytest.mark.parametrize("case", SITE_NARROWINGS, ids=lambda c: c.name)
+def test_narrowing_one_call_site_is_detected(case: SiteNarrowing) -> None:
+    narrowed = narrowed_rules(case)
+    if case.grammar == "syntax":
+        assert parser_accepts(case.witness), f"the parser rejects {case.witness!r}"
+        assert grammar_accepts(case.witness, case.start), f"the spec rejects {case.witness!r}"
+        assert grammar_events(case.witness, case.start, rules=narrowed) is None, "the edit does not narrow the grammar"
+        detected = syntax_narrowing_detected(narrowed)
+    else:
+        assert LEXER_ORACLES[case.start](case.witness), f"the lexer rejects {case.witness!r}"
+        assert char_full_match(case.start, case.witness), f"the spec rejects {case.witness!r}"
+        assert not char_full_match(case.start, case.witness, rules=narrowed), "the edit does not narrow the grammar"
+        detected = lexical_narrowing_detected(narrowed)
+    assert detected, f"{case.name}: the spec lost {case.witness!r} and no test noticed"
 
 
 # ------------------------------------------------------------------ rules that depend on token values or context
