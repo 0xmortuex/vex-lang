@@ -182,8 +182,8 @@ class Host:
         except VexBudgetExceeded as e:
             raise VexBudgetError(e.message, e.trace or []) from None
         except VexHostContractError as e:
-            text = VexRuntimeError(e.message, e.trace or []).render().replace("runtime error", "binding error", 1)
-            raise VexBindingError(text) from None
+            rendered = VexRuntimeError(e.message, e.trace or []).render()
+            raise VexBindingError(rendered.removeprefix("runtime error: ")) from None
         except VexPanic as e:
             raise VexRuntimeError(e.message, e.trace or []) from None
         except RecursionError:
@@ -230,6 +230,8 @@ class Host:
             try:
                 result = fn(*args)
             except VexPanic:
+                if self._vm.fuel < 0:  # a re-entrant call ran out and the host reported a failure instead
+                    raise VexBudgetExceeded("execution budget exhausted") from None
                 raise
             except VexBudgetError as e:
                 raise VexBudgetExceeded(e.message) from None

@@ -514,7 +514,7 @@ def test_size_amplifying_builtins_charge_by_size(body: str) -> None:
     "stmt",
     [
         "s = s + s;",
-        's = "#{s}#{s}";',
+        's = "{s}{s}";',
         's = [s, s].join("");',
         's = s.replace("x", "xx");',
     ],
