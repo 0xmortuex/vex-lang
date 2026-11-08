@@ -4,7 +4,7 @@ Audited at commit `5a7302c` on 2026-11-08 (Windows 11, CPython 3.13.12 via uv). 
 came from a command run on that commit or a file read at it. Ranked gaps are in [ROADMAP.md](ROADMAP.md).
 
 Vex is a statically typed language implemented in pure Python (`requires-python >= 3.10`, zero runtime
-dependencies, about 5,000 lines in `src/vex/`). Source files use `.vx`. Programs compile to in-memory
+dependencies, 6,545 lines in `src/vex/`). Source files use `.vx`. Programs compile to in-memory
 bytecode and run on a stack VM that is itself written in Python.
 
 ## Pipeline
@@ -26,7 +26,7 @@ There is no optimiser pass and no on-disk bytecode format. Instruction fusion ha
 
 ## Modules
 
-| File | Lines (`wc`-style) | Role |
+| File | Non-blank lines | Role |
 |------|------:|------|
 | `src/vex/lexer.py` | 240 | `Lexer`, `Token`, keywords, nested block comments, numeric literals, string escapes, `_interp_end` |
 | `src/vex/parser.py` | 845 | `Parser`, `parse_source`; `MAX_DEPTH = 150` nesting cap; `no_struct` flag for conditions; `repl` mode |
@@ -122,7 +122,8 @@ OS / Python combinations.
 
 - **Builtin:** add a Python function and one `glob` / `method` / `ns` call in `stdlib.py`, then a test.
 - **Diagnostic:** report through the sink with a new code, then add a `tests/errors/<name>.vx` file with an
-  `// expect:` header. `tools/gen_error_corpus.py` holds the generator for that corpus.
+  `// expect:` header. `tools/gen_error_corpus.py` generated the original corpus from a table (its docstring
+  says it is run once and the output is committed).
 - **Syntax:** change `lexer.py` / `parser.py` / `syntax.py`, then every walking stage (`resolver.rx`,
   `checker.infer_inner`, `compiler.cx_inner`), then `docs/grammar.md`. Nothing checks the grammar document
   against the parser automatically.

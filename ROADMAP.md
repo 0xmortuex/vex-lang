@@ -7,13 +7,13 @@ run or a file read during the audit. Hours are rough estimates, not measurements
 
 | | Criterion | Status | Measured evidence |
 |-|-----------|--------|-------------------|
-| a | Written spec | **Partial** | `docs/grammar.md` (112 lines, 6,414 B), `docs/types.md` (118 lines, 8,756 B), `docs/vm.md` (82 lines, 5,474 B). 24 grammar cases checked against the parser: 18 agree, 6 disagree (see below). No evaluation semantics: searching `docs/*.md` for "evaluat", "left to right" or "order of" returns nothing. |
+| a | Written spec | **Partial** | `docs/grammar.md` (137 lines, 6,414 B), `docs/types.md` (151 lines, 8,756 B), `docs/vm.md` (100 lines, 5,474 B). 24 grammar cases checked against the parser: 18 agree, 6 disagree (see below). No evaluation semantics: searching `docs/*.md` for "evaluat", "left to right" or "order of" returns nothing. |
 | b | 200+ passing tests | **Met** | `uv run pytest -q`: **1773 passed, 0 failed, 0 skipped** in 18.14 s. 941 are seeded fuzz or property cases, leaving 832 others. |
 | c | Fuzzed parser that never crashes | **Not met** | A fuzzer exists (`tests/test_fuzz.py`, 941 pass in 1.19 s) and my 2,000-input ASCII run had 0 crashes. A 55 s run with Unicode digits and huge literals: **571 uncaught `ValueError`s in 40,976 inputs (1.4%)**, 15 distinct messages, all at `lexer.py:160` or `:162`, two root causes. No hangs in the parser (slowest input 44 ms). |
 | d | 10+ example programs | **Not met (9)** | `examples/*.vx`: 9 files, all exit 0, 612 lines in total. Three are toys (`hello`, `fizzbuzz`, `fibonacci`). |
 | e | Documented FFI usable from Mort | **Not met** | No FFI of any kind. `extern fn` is a syntax error. Searching for `ffi`, `extern`, `ctypes`, `dlopen`, `native` finds no implementation or documentation. |
 | f | CI green | **Met** | `gh run list -R 0xmortuex/vex-lang -L 5`: run 42241263824 on `main`, `success`, all 6 jobs pass. That is the only run listed. |
-| g | Docs: quickstart, tour, contributor guide, CHANGELOG | **Partial** | README Install / Use it: yes. `docs/tour.md` (304 lines): yes. Contributor guide: **no `CONTRIBUTING.md`**, only a short README "Development" section. `CHANGELOG.md` exists (22 lines, "0.1.0 - unreleased"); no git tags or GitHub releases. |
+| g | Docs: quickstart, tour, contributor guide, CHANGELOG | **Partial** | README Install / Use it: yes. `docs/tour.md` (382 lines): yes. Contributor guide: **no `CONTRIBUTING.md`**, only a short README "Development" section. `CHANGELOG.md` exists (25 lines, "0.1.0 - unreleased"); no git tags or GitHub releases. |
 
 ### Grammar spot-check (`docs/grammar.md` against `parser.py`)
 
@@ -65,8 +65,8 @@ The parser accepts these although the grammar excludes them (6):
   `write_file`, `read_line`), `env` (`args`, `get`). No time, random, JSON, path / directory, process or network APIs.
 - **Benchmarks:** `benchmarks/fib.vx`, `benchmarks/loops.vx`, `benchmarks/run.py`.
 - **fib(30), best of 3:** **4.956 s** on the VM against 0.110 s in CPython (**44.9x slower**), about 543,000 calls/s.
-  Compile time 1 ms. `benchmarks/run.py`: fib(27) 1.127 s (52.7x); loops 3.478 s (37.4x). The README lists 0.76 s and 2.8 s; the
-  machine was also running other agents' work during this audit, so these are upper-end figures.
+  Compile time 1 ms. `benchmarks/run.py`: fib(27) 1.127 s (52.7x); loops 3.478 s (37.4x). The README lists 0.76 s and 2.8 s. Other
+  agents were working on this machine during the audit, so these timings may run high.
 
 ## FFI, exactly what exists
 
@@ -112,12 +112,12 @@ there is no direct path in either direction; Mort could only spawn `vex` as a su
 ### 3. Python exceptions and out-of-range values escape at runtime
 
 - **Missing:** `VM.run_function` converts only `VexPanic` and `RecursionError`.
-- **Why it matters:** Each of these, run through the CLI, breaks a documented guarantee. The first six exit 70.
+- **Why it matters:** Each of these was run through the CLI. The first six rows exit 70, an internal error, instead of a Vex runtime error.
 
   | Program | Result |
   |---------|--------|
   | `() < ()`, `[(), ()].sort()` | `TypeError`, though `docs/types.md` lists `Unit` as `Ord` |
-  | `(1e308 * 10.0) % 2.0` | `ValueError` from `math.fmod`, though docs promise IEEE `%` on non-zero divisors |
+  | `(1e308 * 10.0) % 2.0` | `ValueError` from `math.fmod`; `docs/types.md` only defines `%` by `0.0` as a runtime error |
   | `(math.INT_MIN..math.INT_MAX).len()` | `OverflowError` |
   | `"9".repeat(5000).to_int()` | `ValueError` (4,300-digit limit) |
   | `print(55296.to_char())`, `print("\u{D800}")` | `UnicodeEncodeError` on a lone surrogate |
@@ -245,7 +245,7 @@ Vex facts were measured here. Mort facts come from reading its `README.md`, `doc
 - A REPL with persistent state and `:type`. `mortc.py` has no REPL command.
 - String interpolation with full expressions, and a `?` operator for `Option` and `Result`.
 - Exhaustiveness across nested patterns, tuples, bools, literals, or-patterns and guards, with a witness for the missing case. Mort's spec requires exhaustive enum matches, with positional payload bindings.
-- Inferred function return types and lambda parameter types.
+- A function return type is inferred when omitted (`fn sq(n: Int) { n * n }`). Mort's grammar also makes `-> type` optional; whether omission means inference there was not verified.
 - Trapping integer overflow on every operation. Mort's fixed-width integers wrap modulo 2^N by specification.
 - Source-mapped runtime stack traces and a bytecode disassembler, with no C compiler needed: zero dependencies beyond Python.
 - Built-in growable `List`, `Map` and Unicode `Str` values managed by the host runtime.
