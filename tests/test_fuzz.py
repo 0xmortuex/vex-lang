@@ -18,13 +18,16 @@ from typing import Any
 
 import pytest
 
+from vex import runtime, stdlib
 from vex.api import Program, compile_source, compile_text, read_source
 from vex.cli import _run_big_stack
 from vex.diagnostics import DiagSink, Source, VexError, VexRuntimeError
 from vex.parser import parse_source
 from vex.repl import run_repl
 from vex.runtime import INT_MAX, INT_MIN, VexExit
+from vex.symbols import Builtin
 from vex.vm import VM
+from vex.vtypes import BOOL, FLOAT, INT, NEVER, RANGE, STR, UNIT, TCon, TFn, TParam, TTuple, Type, show
 
 ROOT = pathlib.Path(__file__).parent.parent
 SEED_FILES = sorted((ROOT / "examples").glob("*.vx")) + sorted((ROOT / "tests" / "errors").glob("*.vx"))
@@ -236,10 +239,12 @@ def test_identifier_swaps_never_crash(seed: int) -> None:
 #   2. each of its diagnostics has a line and column and renders (only the "too many errors" note,
 #      which belongs to no position, is exempt);
 #   3. the full compiler lets no exception out except VexError, whose diagnostics all render;
-#   4. a program the compiler accepts runs, under RUN_BUDGET traced Python events, with no exception
-#      out of the VM except VexRuntimeError or VexExit, printing through a stream encoded as the CLI's is;
-#   5. byte inputs also drive the REPL, through a stdin configured as the CLI's is;
-#   6. no input takes longer than HANG_SECONDS. The watchdog ends the process if one does.
+#   4. a program the compiler accepts runs, under RUN_BUDGET traced Python events and the FUZZ_MAX_* size
+#      limits, with no exception out of the VM except VexRuntimeError or VexExit, printing through a stream
+#      encoded as the CLI's is;
+#   5. every input also drives the REPL, through a stdin configured as the CLI's is;
+#   6. no input takes longer than HANG_SECONDS. The watchdog ends the process if one does. The budget in
+#      (4) and (5) must not hide a slow REPL, so the repl_scale family runs without one.
 #
 # All of it runs in the CLI's own configuration (cli._run_big_stack: big stack, recursion limit 60,000).
 # Inputs are a pure function of (seed, family, index), so any failure can be replayed.
@@ -247,9 +252,12 @@ def test_identifier_swaps_never_crash(seed: int) -> None:
 
 HANG_SECONDS = 10.0
 RUN_BUDGET = 20_000
-# Not executed: file access has side effects, and these builtins allocate in one call that no budget can
-# interrupt. The compile-time contract still applies to these programs.
-UNSAFE_TO_RUN = re.compile(r"\bio\b|\benv\b|repeat|to_list|chars|pad_|join|\.\.")
+# Not executed, since it writes to disk. The compile-time contract still applies to these programs.
+UNSAFE_TO_RUN = re.compile(r"\bwrite_file\b")
+# Memory protection: every one-call allocation is limited (runtime.MAX_*), and these make the limits small
+# enough that nothing a fuzzed program builds within RUN_BUDGET can hurt the machine.
+FUZZ_MAX_STR = 100_000
+FUZZ_MAX_LIST = 10_000
 
 UNICODE_SAMPLES = [
     "٣", "९", "１", "\U0001d7d7",  # Nd: decimal digits
@@ -388,6 +396,123 @@ def gen_chain(rng: random.Random) -> str:
     return f"fn main() {{\n  let v = {tail};\n}}\n"
 
 
+HOSTILE_INTS = ["0", "1", "(-1)", "2", "64", "65", "55296", "57343", "1114111", "1114112", "9223372036854775807",
+                "(-9223372036854775807)", "(0 - 9223372036854775807 - 1)", "9223372036854775806"]  # fmt: skip
+HOSTILE_FLOATS = ["0.0", "(0.0 * -1.0)", "1.5", "(-2.5)", "1e308", "(-1e308)", "1e-320", "(1e308 * 10.0)",
+                  "(-1e308 * 10.0)", "(1e308 * 10.0 - 1e308 * 10.0)"]  # fmt: skip
+HOSTILE_STRS = ['""', '"a"', '"a,b"', '"a\\0b"', '"\\0"', '"\\u{10FFFF}"', '"é"', '"  12 "', '"+9"', '"1e999"', '"."',
+                '".."', '"9".repeat(5000)', '"a".repeat(100000)', '"é".repeat(50000)', '"\\n\\n"']  # fmt: skip
+HOSTILE_RANGES = ["0..0", "0..3", "5..1", "(-3)..3", "0..=0", "0..9223372036854775807",
+                  "(0 - 9223372036854775807 - 1)..9223372036854775807", "0..=9223372036854775807",
+                  "(0 - 9223372036854775807 - 1)..=(0 - 9223372036854775807 - 1)"]  # fmt: skip
+# A path write_file can never create: it writes to disk, so it only gets arguments that must fail cleanly.
+IMPOSSIBLE_PATHS = ['"a\\0b"', '"\\0"', '""', '"."', '"a".repeat(70000) + "\\0"']
+
+
+def all_builtins() -> list[tuple[str, str, Builtin]]:
+    """Every function and method of the standard library as (how it is called, name, builtin)."""
+    found = [("global", name, b) for name, b in stdlib.GLOBALS.items()]
+    found += [("method", name, b) for table in stdlib.METHODS.values() for name, b in table.items()]
+    found += [("namespace", b.qual, b) for table in stdlib.NAMESPACES.values() for b in table.values() if not b.is_const]
+    return found
+
+
+BUILTINS = all_builtins()
+
+
+def instantiate(t: Type, chosen: dict[str, Type]) -> Type:
+    if isinstance(t, TParam):
+        return chosen[t.name]
+    if isinstance(t, TCon):
+        return TCon(t.name, tuple(instantiate(a, chosen) for a in t.args))
+    if isinstance(t, TTuple):
+        return TTuple(tuple(instantiate(i, chosen) for i in t.items))
+    if isinstance(t, TFn):
+        return TFn(tuple(instantiate(p, chosen) for p in t.params), instantiate(t.ret, chosen))
+    return t
+
+
+SIMPLE_VALUES = {INT: HOSTILE_INTS, FLOAT: HOSTILE_FLOATS, STR: HOSTILE_STRS, RANGE: HOSTILE_RANGES, BOOL: ["true", "false"],
+                 UNIT: ["()"]}  # fmt: skip
+SIMPLE_VALUES_BY_NAME = {t.name: v for t, v in SIMPLE_VALUES.items()}
+
+
+def hostile_value(t: Type, rng: random.Random) -> str:  # noqa: C901 - one case per type former
+    """A Vex expression of type ``t``, built from the values builtins are most likely to mishandle."""
+    if isinstance(t, TCon) and t.name in SIMPLE_VALUES_BY_NAME:
+        return rng.choice(SIMPLE_VALUES_BY_NAME[t.name])
+    if isinstance(t, TTuple):
+        return "(" + ", ".join(hostile_value(i, rng) for i in t.items) + ")"
+    if isinstance(t, TFn):
+        params = ", ".join(f"p{i}: {show(p)}" for i, p in enumerate(t.params))
+        return f"|{params}| " + ('panic("callback")' if rng.random() < 0.2 else hostile_value(t.ret, rng))
+    assert isinstance(t, TCon), show(t)
+    if t.name == "List":
+        items = [hostile_value(t.args[0], rng) for _ in range(rng.choice([0, 1, 2, 3]))]
+        return "[" + ", ".join(items) + "]"
+    if t.name == "Map":
+        pairs = [f"{hostile_value(t.args[0], rng)}: {hostile_value(t.args[1], rng)}" for _ in range(rng.choice([0, 1, 2]))]
+        return "#{" + ", ".join(pairs) + "}"
+    if t.name == "Option":
+        return rng.choice(["None", f"Some({hostile_value(t.args[0], rng)})"])
+    if t.name == "Result":
+        return f"Ok({hostile_value(t.args[0], rng)})" if rng.random() < 0.5 else f"Err({hostile_value(t.args[1], rng)})"
+    raise AssertionError(f"no hostile values for {show(t)}")
+
+
+def program_calling(kind: str, name: str, builtin: Builtin, rng: random.Random) -> str:
+    """One complete program calling ``builtin``, its arguments bound first so that empty literals have types."""
+    chosen = {p.name: rng.choice([INT, STR, UNIT, TTuple((INT, STR))]) for p in builtin.tparams}
+    fn = instantiate(builtin.ty, chosen)
+    assert isinstance(fn, TFn)
+    values = [hostile_value(p, rng) for p in fn.params]
+    if builtin.qual == "io.write_file":
+        values[0] = rng.choice(IMPOSSIBLE_PATHS)
+    lets = [f"  let mut a{i}: {show(p)} = {v};\n" for i, (p, v) in enumerate(zip(fn.params, values))]
+    args = [f"a{i}" for i in range(len(values))]
+    call = f"{args[0]}.{name}({', '.join(args[1:])})" if kind == "method" else f"{name}({', '.join(args)})"
+    statement = f"  {call};\n" if fn.ret in (UNIT, NEVER) else f"  print({call});\n"
+    return "fn main() {\n" + "".join(lets) + statement + "}\n"
+
+
+def gen_builtin_call(rng: random.Random) -> str:
+    kind, name, builtin = rng.choice(BUILTINS)
+    return program_calling(kind, name, builtin, rng)
+
+
+REPL_LINES = [
+    'let a: Int = panic("x");', "a", "a + 1", "a = 1;", "let mut s = \"ab\";", "s = s + s;", "s", "s.len()",
+    "fn g() -> Int { a }", "g()", ":type a", ":reset", "[1, 2].map(|x| x * 2)", "1..=9223372036854775807",
+    "struct N { kids: List[N] }", "let mut c = N { kids: [] };", "for i in 0..30 { c = N { kids: [c, c] }; }", "c",
+    "let mut n = N { kids: [] };", "n.kids.push(n);", "n", "[n] == [n]", "55296.to_char()", "(0..9223372036854775807).to_list()",
+    'io.read_file("a\\0b")', '"a".repeat(9223372036854775807)', "panic(\"boom\")", "() < ()", '"{', "(", ")", '"', "/*", "*/",
+]  # fmt: skip
+
+
+def gen_repl_session(rng: random.Random) -> bytes:
+    """A REPL session mixing statements that fail halfway with values that are hard to echo."""
+    lines = []
+    for _ in range(rng.randint(2, 30)):
+        if rng.random() < 0.15:
+            lines.extend(gen_builtin_call(rng).splitlines()[1:-1])  # the body of a call, one statement per input
+        else:
+            lines.append(rng.choice(REPL_LINES))
+    return "\n".join(lines).encode("utf-8", "surrogatepass") + b"\n"
+
+
+UNFINISHED_LINES = ["(", "[", "#{", "{", '"abc', "/* abc", "( // abc", '"{', '"{"abc', '"\\u{', '"\\', "", "   ", "/*", "\\"]
+FINISHED_LINES = ["1", "let x = 1;", "fn f() {}", "// comment", "", ":help", '"a"', "1 + 2 * 3", "[1, 2, 3].len()"]
+
+
+def gen_repl_scale(rng: random.Random) -> bytes:
+    """Input whose only hostile property is its size, to expose a REPL that is not linear in it."""
+    if rng.random() < 0.7:
+        body = "(\n" * rng.choice([0, 1]) + (rng.choice(UNFINISHED_LINES) + "\n") * rng.choice([1000, 3000, 12_000])
+    else:
+        body = (rng.choice(FINISHED_LINES) + "\n") * rng.choice([1000, 3000, 6000])
+    return body.encode("utf-8")
+
+
 FAMILIES: dict[str, Callable[[random.Random], str | bytes]] = {
     "soup": gen_soup,
     "literal": gen_literal,
@@ -397,8 +522,17 @@ FAMILIES: dict[str, Callable[[random.Random], str | bytes]] = {
     "unicode": gen_unicode,
     "mutated": gen_mutated,
     "bytes": gen_bytes,
+    "builtin": gen_builtin_call,
+    "repl_session": gen_repl_session,
+    "repl_scale": gen_repl_scale,
 }
-DEFAULT_CASES = {"soup": 200, "literal": 120, "accepted": 150, "nesting": 60, "chain": 3, "unicode": 200, "mutated": 200, "bytes": 200}
+DEFAULT_CASES = {"soup": 200, "literal": 120, "accepted": 150, "nesting": 60, "chain": 3, "unicode": 200, "mutated": 200, "bytes": 200,
+                 "builtin": 200, "repl_session": 100, "repl_scale": 12}  # fmt: skip
+UNBUDGETED_FAMILIES = {"repl_scale"}
+
+
+def repl_budget(family: str) -> int | None:
+    return None if family in UNBUDGETED_FAMILIES else RUN_BUDGET
 
 
 def hostile_input(seed: int, family: str, index: int) -> str | bytes:
@@ -429,9 +563,12 @@ class RunBudgetExceeded(BaseException):
     """Stops a fuzzed program. BaseException, so that nothing in the VM can swallow it."""
 
 
-def run_within_budget(call: Callable[[], object]) -> bool:
-    """Run ``call`` for at most RUN_BUDGET traced Python events; False if the budget ran out."""
-    remaining = RUN_BUDGET
+def run_within_budget(call: Callable[[], object], budget: int | None = RUN_BUDGET) -> bool:
+    """Run ``call`` for at most ``budget`` traced Python events (None: no limit); False if it ran out."""
+    if budget is None:
+        call()
+        return True
+    remaining = budget
 
     def tracer(frame: FrameType, event: str, arg: Any) -> Any:
         nonlocal remaining
@@ -485,18 +622,35 @@ def run_program(prog: Program) -> bool:
     return run_within_budget(call)
 
 
-def drive_repl(data: bytes) -> None:
+def drive_repl(data: bytes, budget: int | None = RUN_BUDGET) -> None:
     stdin = io.TextIOWrapper(io.BytesIO(data), encoding="utf-8", errors="surrogateescape")
-    run_within_budget(lambda: run_repl(stdin, cli_output()))
+    run_within_budget(lambda: run_repl(stdin, cli_output()), budget)
 
 
-def assert_never_crashes(prepared: str | pathlib.Path) -> str:
+@contextmanager
+def fuzz_limits() -> Iterator[None]:
+    saved = runtime.MAX_STR_LEN, runtime.MAX_LIST_LEN
+    runtime.MAX_STR_LEN, runtime.MAX_LIST_LEN = FUZZ_MAX_STR, FUZZ_MAX_LIST
+    try:
+        yield
+    finally:
+        runtime.MAX_STR_LEN, runtime.MAX_LIST_LEN = saved
+
+
+def as_bytes(prepared: str | pathlib.Path) -> bytes:
+    if isinstance(prepared, pathlib.Path):
+        return prepared.read_bytes()
+    return prepared.encode("utf-8", "surrogatepass")
+
+
+def assert_never_crashes(prepared: str | pathlib.Path, budget: int | None = RUN_BUDGET) -> str:
     """Enforce the contract above like the CLI would; return "rejected", "ran" or "out-of-budget"."""
     outcome = ["rejected"]
 
     def check() -> None:
         source = read_source(str(prepared)) if isinstance(prepared, pathlib.Path) else Source("<fuzz>", prepared)
         assert_front_end_contract(source)
+        runnable = UNSAFE_TO_RUN.search(source.text) is None
         try:
             prog = compile_source(source)
         except VexError as e:
@@ -504,12 +658,13 @@ def assert_never_crashes(prepared: str | pathlib.Path) -> str:
             for d in e.diagnostics:
                 d.render()
         else:
-            if UNSAFE_TO_RUN.search(source.text) is None:
+            if runnable:
                 outcome[0] = "ran" if run_program(prog) else "out-of-budget"
-        if isinstance(prepared, pathlib.Path) and UNSAFE_TO_RUN.search(source.text) is None:
-            drive_repl(prepared.read_bytes())
+        if runnable:
+            drive_repl(as_bytes(prepared), budget)
 
-    like_the_cli(check)
+    with fuzz_limits():
+        like_the_cli(check)
     return outcome[0]
 
 
@@ -572,7 +727,7 @@ def test_hostile_input_never_crashes(
 ) -> None:
     prepared = prepare(hostile_input(fuzz_seed, family, index), scratch_file)
     with watchdog.timing(f"seed={fuzz_seed} family={family} index={index}"):
-        assert_never_crashes(prepared)
+        assert_never_crashes(prepared, repl_budget(family))
 
 
 def test_harness_uses_the_cli_configuration_and_restores_it() -> None:
@@ -612,6 +767,88 @@ def test_accepted_family_really_reaches_the_vm(scratch_file: pathlib.Path) -> No
     assert outcomes.count("ran") >= 20
 
 
+EXAMPLES = sorted((ROOT / "examples").glob("*.vx"))
+
+
+@pytest.mark.parametrize("example", EXAMPLES, ids=lambda p: p.stem)
+def test_every_example_seed_reaches_the_vm(example: pathlib.Path, scratch_file: pathlib.Path) -> None:
+    assert UNSAFE_TO_RUN.search(example.read_text(encoding="utf-8")) is None
+    assert assert_never_crashes(example) in ("ran", "out-of-budget")
+
+
+@pytest.mark.parametrize(
+    "body",
+    ["for i in 0..3 { print(i); }", "print((0..5).to_list());", 'print("ab".repeat(3));', 'print("ab".chars());',
+     'print(["a"].join(","));', 'print(io.read_file("no-such-file"));', 'print(env.get("PATH").is_some());',
+     'print((0..9223372036854775807).to_list());'],
+    ids=["range", "to_list", "repeat", "chars", "join", "read_file", "env", "huge-to_list"],
+)  # fmt: skip
+def test_only_writing_files_is_excluded_from_running(body: str) -> None:
+    assert UNSAFE_TO_RUN.search(body) is None
+    assert assert_never_crashes(f"fn main() {{ {body} }}") == "ran"
+
+
+def test_writing_files_is_never_run_by_the_fuzzer() -> None:
+    assert assert_never_crashes('fn main() { io.write_file("x", "y"); }') == "rejected"
+
+
+def test_fuzz_limits_apply_during_a_run_and_are_restored() -> None:
+    before = runtime.MAX_STR_LEN, runtime.MAX_LIST_LEN
+    with fuzz_limits():
+        assert (runtime.MAX_STR_LEN, runtime.MAX_LIST_LEN) == (FUZZ_MAX_STR, FUZZ_MAX_LIST)
+    assert (runtime.MAX_STR_LEN, runtime.MAX_LIST_LEN) == before
+
+
+def test_harness_catches_a_crash_in_a_repl_input() -> None:
+    def crash(*args: object) -> None:
+        raise KeyError("a#1")
+
+    original = run_repl.__globals__["Session"].handle
+    run_repl.__globals__["Session"].handle = crash
+    try:
+        with pytest.raises(KeyError):
+            assert_never_crashes("fn main() {}\n1\n")
+    finally:
+        run_repl.__globals__["Session"].handle = original
+
+
+def test_scale_family_is_really_large_and_unbudgeted() -> None:
+    sizes = [len(hostile_input(0, "repl_scale", i)) for i in range(DEFAULT_CASES["repl_scale"])]
+    assert max(sizes) >= 24_000
+    assert repl_budget("repl_scale") is None and repl_budget("soup") == RUN_BUDGET
+
+
+def test_builtin_audit_covers_the_whole_standard_library() -> None:
+    assert len(BUILTINS) >= 124
+    tables = {b.qual.split(".")[0] for _, _, b in BUILTINS if "." in b.qual}
+    assert tables >= {"Int", "Float", "Bool", "Str", "List", "Map", "Option", "Result", "Range", "math", "io", "env"}
+
+
+@pytest.mark.parametrize("target", BUILTINS, ids=lambda t: t[2].qual)
+def test_every_builtin_survives_hostile_arguments(target: tuple[str, str, Builtin], watchdog: Watchdog) -> None:
+    """Every builtin, on the values most likely to break it: only a Vex error may stop it, and Ints stay in range."""
+    kind, name, builtin = target
+    rng = random.Random(f"audit/{builtin.qual}")
+    assert isinstance(builtin.ty, TFn)
+    returns_int = builtin.ty.ret == INT
+    stdin = sys.stdin
+    sys.stdin = io.StringIO("")
+    try:
+        with fuzz_limits(), watchdog.timing(f"builtin {builtin.qual}"):
+            for _ in range(25):
+                prog = compile_text(program_calling(kind, name, builtin, rng), "<audit>")
+                assert prog.main is not None
+                out = io.StringIO()
+                try:
+                    VM(out).run_function(prog.main)
+                except (VexRuntimeError, VexExit):
+                    continue
+                if returns_int:
+                    assert INT_MIN <= int(out.getvalue()) <= INT_MAX, builtin.qual
+    finally:
+        sys.stdin = stdin
+
+
 def test_hostile_inputs_are_reproducible() -> None:
     for family in FAMILIES:
         assert hostile_input(3, family, 11) == hostile_input(3, family, 11)
@@ -637,7 +874,7 @@ def test_hostile_campaign(
     seconds = request.config.getoption("--fuzz-seconds")
     assert isinstance(seconds, float)
     names = list(FAMILIES)
-    rotation = [name for name in names if name != "chain"]  # chains are slow, so they get a small share
+    rotation = [name for name in names if name not in ("chain", "repl_scale")]  # slow, so they get a small share
     crashes: dict[tuple[str, str], str] = {}
     counts = dict.fromkeys(names, 0)
     total_crashes = 0
@@ -646,14 +883,14 @@ def test_hostile_campaign(
     started = time.monotonic()
     index = 0
     while (time.monotonic() - started < seconds) if seconds > 0 else (index < 24):
-        family = "chain" if index % 64 == 63 else rotation[index % len(rotation)]
+        family = "chain" if index % 64 == 63 else "repl_scale" if index % 64 == 31 else rotation[index % len(rotation)]
         case = hostile_input(fuzz_seed, family, index)
         name = f"seed={fuzz_seed} family={family} index={index}"
         prepared = prepare(case, scratch_file)
         t0 = time.monotonic()
         try:
             with watchdog.timing(name):
-                outcomes[assert_never_crashes(prepared)] += 1
+                outcomes[assert_never_crashes(prepared, repl_budget(family))] += 1
         except Exception as e:  # recording every escape is the job of this harness
             total_crashes += 1
             frame = traceback.extract_tb(e.__traceback__)[-1]
