@@ -6,11 +6,12 @@ import io
 import subprocess
 import sys
 import time
+from typing import Any
 
 import pytest
 from helpers import run_body
 
-from vex import stdlib
+from vex import cli, stdlib
 from vex.api import compile_text
 from vex.diagnostics import VexRuntimeError
 from vex.vm import VM
@@ -182,3 +183,147 @@ def test_str_to_float_rejects_long_input_in_linear_time(text: str) -> None:
 )  # fmt: skip
 def test_str_to_float_grammar_is_unchanged(text: str, expected: str) -> None:
     assert run_body(f"print(({text}).to_float());") == expected + "\n"
+
+
+# ---------------------------------------------------------------- the file system and the standard streams
+NUL_PATHS = ['"a\\0b"', '"\\0"', '"a.txt\\0.exe"']
+
+
+@pytest.mark.parametrize("path", NUL_PATHS)
+def test_read_file_of_an_impossible_path_is_err(path: str) -> None:
+    assert run_body(f"print(io.read_file({path}).is_err());") == "true\n"
+
+
+@pytest.mark.parametrize("path", NUL_PATHS)
+def test_write_file_of_an_impossible_path_is_err(path: str) -> None:
+    assert run_body(f'print(io.write_file({path}, "x").is_err());') == "true\n"
+
+
+@pytest.mark.parametrize("path", ['""', '"."', '"a".repeat(70000)'], ids=["empty", "directory", "too-long"])
+def test_file_builtins_report_os_errors_as_err(path: str) -> None:
+    assert run_body(f'print(io.read_file({path}).is_err()); print(io.write_file({path}, "x").is_err());') == "true\ntrue\n"
+
+
+def test_err_from_an_impossible_path_names_the_problem() -> None:
+    out = run_body('match io.read_file("a\\0b") { Ok(_) => print("ok"), Err(e) => print(e) }')
+    assert "null" in out
+
+
+class Broken:
+    """A stream whose every operation fails the way a dead pipe, closed file or strict codec does."""
+
+    def __init__(self, error: Exception) -> None:
+        self.error = error
+
+    def write(self, text: str) -> int:
+        raise self.error
+
+    def readline(self, limit: int = -1) -> str:
+        raise self.error
+
+
+WRITE_FAILURES = [OSError(22, "Invalid argument"), BrokenPipeError(32, "Broken pipe"), ValueError("I/O operation on closed file"),
+                  UnicodeEncodeError("ascii", "é", 0, 1, "ordinal not in range")]  # fmt: skip
+
+
+def run_on(out: Any, body: str) -> None:
+    prog = compile_text("fn main() {\n" + body + "\n}\n", "<t>")
+    assert prog.main is not None
+    VM(out).run_function(prog.main)
+
+
+@pytest.mark.parametrize("failure", WRITE_FAILURES, ids=lambda e: type(e).__name__)
+def test_print_to_a_failing_stream_is_a_located_error(failure: Exception) -> None:
+    with pytest.raises(VexRuntimeError) as info:
+        run_on(Broken(failure), "print(1);")
+    assert "cannot write to standard output" in info.value.message
+    assert info.value.trace[0][1] is not None
+
+
+@pytest.mark.parametrize("failure", WRITE_FAILURES, ids=lambda e: type(e).__name__)
+def test_eprint_to_a_failing_stream_is_a_located_error(failure: Exception, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sys, "stderr", Broken(failure))
+    panics("eprint(1);", "cannot write to standard error")
+
+
+def test_print_without_a_stdout_is_a_located_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    prog = compile_text("fn main() {\nprint(1);\n}\n", "<t>")
+    assert prog.main is not None
+    monkeypatch.setattr(sys, "stdout", None)
+    with pytest.raises(VexRuntimeError) as info:
+        VM().run_function(prog.main)
+    assert "standard output is not available" in info.value.message
+
+
+def test_eprint_without_a_stderr_is_a_located_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sys, "stderr", None)
+    panics("eprint(1);", "standard error is not available")
+
+
+@pytest.mark.parametrize("failure", [OSError(9, "Bad file descriptor"), ValueError("I/O operation on closed file")], ids=["os", "closed"])
+def test_read_line_from_a_failing_stream_is_a_located_error(failure: Exception, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sys, "stdin", Broken(failure))
+    panics("print(io.read_line());", "cannot read standard input")
+
+
+def test_read_line_of_undecodable_bytes_from_a_strict_stream(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sys, "stdin", Broken(UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")))
+    panics("print(io.read_line());", "standard input is not valid UTF-8")
+
+
+def test_read_line_without_a_stdin_is_the_end_of_input(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sys, "stdin", None)
+    assert run_body("print(io.read_line());") == "None\n"
+
+
+def launch(*args: str, **kwargs: Any) -> subprocess.Popen[bytes]:
+    return subprocess.Popen([sys.executable, "-m", "vex", *args], stdout=subprocess.PIPE, stderr=subprocess.PIPE, **kwargs)
+
+
+def test_cli_program_writing_to_a_closed_pipe_is_a_located_error(tmp_path: Any) -> None:
+    src = tmp_path / "p.vx"
+    src.write_text('fn main() {\n  for i in 0..200000 { print("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"); }\n}\n', encoding="utf-8")
+    child = launch("run", str(src))
+    assert child.stdout is not None and child.stderr is not None
+    child.stdout.close()
+    err = child.stderr.read()
+    assert child.wait(timeout=60) == cli.EXIT_RUNTIME, err
+    assert b"cannot write to standard output" in err and b"p.vx:2:" in err
+    assert b"internal compiler error" not in err and b"Exception ignored" not in err
+
+
+def test_cli_output_lost_at_exit_is_reported_once(tmp_path: Any) -> None:
+    src = tmp_path / "p.vx"
+    src.write_text('fn main() { print("x"); }\n', encoding="utf-8")
+    child = launch("run", str(src))
+    assert child.stdout is not None and child.stderr is not None
+    child.stdout.close()
+    err = child.stderr.read()
+    assert child.wait(timeout=60) == cli.EXIT_RUNTIME, err
+    assert b"internal compiler error" not in err and b"Exception ignored" not in err
+
+
+def test_cli_repl_writing_to_a_closed_pipe_exits_cleanly() -> None:
+    child = launch("repl", stdin=subprocess.PIPE)
+    assert child.stdin is not None and child.stdout is not None and child.stderr is not None
+    child.stdout.close()
+    try:
+        child.stdin.write(b"1\n" * 50_000)
+        child.stdin.close()
+    except OSError:  # the REPL has already stopped reading, which is what this test is about
+        pass
+    err = child.stderr.read()
+    assert child.wait(timeout=60) == cli.EXIT_RUNTIME, err
+    assert b"internal compiler error" not in err and b"Exception ignored" not in err
+
+
+@pytest.mark.parametrize("stream", ["stdin", "stdout"])
+def test_cli_repl_without_a_standard_stream_exits_cleanly(stream: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    monkeypatch.setattr(sys, stream, None)
+    assert cli.main(["repl"]) == cli.EXIT_RUNTIME
+    assert "needs standard input and output" in capsys.readouterr().err
+
+
+def test_cli_disasm_of_an_unreadable_file_is_a_diagnostic(capsys: pytest.CaptureFixture[str]) -> None:
+    assert cli.main(["disasm", "no-such-file.vx"]) == cli.EXIT_COMPILE
+    assert "cannot read no-such-file.vx" in capsys.readouterr().err

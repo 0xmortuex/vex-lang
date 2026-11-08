@@ -106,12 +106,21 @@ def checked(r: int, what: str) -> int:
 
 
 # ------------------------------------------------------------------ global functions
+def _emit(stream: Any, text: str, name: str) -> None:
+    if stream is None:
+        raise VexPanic(f"{name} is not available")
+    try:
+        stream.write(text + "\n")
+    except (OSError, ValueError) as e:  # a dead pipe, a closed file, or a codec that cannot encode the text
+        raise VexPanic(f"cannot write to {name}: {e}") from None
+
+
 def _print(vm: Any, x: Any) -> None:
-    vm.out.write(display(x) + "\n")
+    _emit(vm.out, display(x), "standard output")
 
 
 def _eprint(vm: Any, x: Any) -> None:
-    sys.stderr.write(display(x) + "\n")
+    _emit(sys.stderr, display(x), "standard error")
 
 
 def _panic(msg: str) -> None:
@@ -518,12 +527,16 @@ ns("math", "gcd", "(Int, Int) -> Int", _gcd)
 ns("math", "hypot", "(Float, Float) -> Float", math.hypot)
 
 
+def _file_error(path: str, e: Exception) -> Any:
+    return err(f"{path}: {e.strerror if isinstance(e, OSError) and e.strerror else e}")
+
+
 def _read_file(path: str) -> Any:
     try:
         with open(path, encoding="utf-8") as fh:
             return ok(fh.read())
-    except (OSError, UnicodeDecodeError) as e:
-        return err(f"{path}: {e.strerror if isinstance(e, OSError) and e.strerror else e}")
+    except (OSError, ValueError) as e:  # ValueError: undecodable contents, or a path holding a NUL
+        return _file_error(path, e)
 
 
 def _write_file(path: str, text: str) -> Any:
@@ -531,12 +544,19 @@ def _write_file(path: str, text: str) -> Any:
         with open(path, "w", encoding="utf-8", newline="") as fh:
             fh.write(text)
         return ok(None)
-    except OSError as e:
-        return err(f"{path}: {e.strerror or e}")
+    except (OSError, ValueError) as e:  # ValueError: a path holding a NUL
+        return _file_error(path, e)
 
 
 def _read_line() -> Any:
-    line = sys.stdin.readline()
+    if sys.stdin is None:  # started with stdin closed: there is nothing to read
+        return NONE
+    try:
+        line = sys.stdin.readline()
+    except UnicodeDecodeError:
+        raise VexPanic("standard input is not valid UTF-8") from None
+    except (OSError, ValueError) as e:
+        raise VexPanic(f"cannot read standard input: {e}") from None
     if first_undecodable(line) is not None:
         raise VexPanic("standard input is not valid UTF-8")
     return NONE if line == "" else some(line.rstrip("\r\n"))
