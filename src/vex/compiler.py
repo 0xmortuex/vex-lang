@@ -9,7 +9,7 @@ from vex import syntax as ast
 from vex.diagnostics import Span
 from vex.runtime import Adt, AdtInfo, BuiltinFn, Closure
 from vex.symbols import Builtin, Env, FnSym, GlobalVar, LocalSym, VariantInfo
-from vex.vtypes import TCon, TTuple, Type, zonk
+from vex.vtypes import TCon, TNever, TTuple, Type, zonk
 
 INT_BINOPS = {"+": bc.ADD_I, "-": bc.SUB_I, "*": bc.MUL_I, "/": bc.DIV_I, "%": bc.MOD_I}
 FLOAT_BINOPS = {"+": bc.ADD_F, "-": bc.SUB_F, "*": bc.MUL_F, "/": bc.DIV_F, "%": bc.MOD_F}
@@ -348,14 +348,8 @@ class FnCompiler:
         self.cx_each([e.left, e.right])
         if op in CMP_OPS:
             self.emit(CMP_OPS[op])
-        elif tn == "Int":
-            self.emit(INT_BINOPS[op])
-        elif tn == "Float":
-            self.emit(FLOAT_BINOPS[op])
-        elif tn == "Str":
-            self.emit(bc.ADD_S)
         else:
-            raise AssertionError(f"binary {op} on {tn!r}")  # pragma: no cover
+            self.carith(op, e.left.ty)
 
     # ---- calls
     def ccall(self, e: ast.Call) -> None:
@@ -453,14 +447,17 @@ class FnCompiler:
 
     def carith(self, op: str, ty: Type | None) -> None:
         tn = _ty_name(ty)
-        if tn == "Int":
+        if ty is not None and isinstance(zonk(ty), TNever):
+            # No value of type Never exists: evaluating the operand already left this path.
+            self.emit(bc.PANIC, "unreachable: arithmetic on a value of type Never")
+        elif tn == "Int":
             self.emit(INT_BINOPS[op])
         elif tn == "Float":
             self.emit(FLOAT_BINOPS[op])
         elif tn == "Str":
             self.emit(bc.ADD_S)
         else:
-            raise AssertionError(f"compound op on {tn!r}")  # pragma: no cover
+            raise AssertionError(f"arithmetic {op} on {tn!r}")  # pragma: no cover
 
     # ---- control flow
     def cblock(self, b: ast.Block, want: bool) -> None:

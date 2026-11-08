@@ -15,6 +15,7 @@ import pytest
 from helpers import error_codes
 
 from vex.api import compile_text
+from vex.diagnostics import VexRuntimeError
 from vex.vm import VM
 
 PRELUDE = """
@@ -254,3 +255,70 @@ def test_jump_and_try_in_the_same_operand_list() -> None:
     fn main() { print(f(Some(5))); print(f(None)); }
     """
     assert run(src) == "[0, 5, 7]\nk0\n[0, 5, 7]\nk1\nSome(0)\nNone\n"
+
+
+# ---- operators whose operand has type Never: the operator is unreachable but must still compile
+NEVER_FORMS = {
+    "break": "break",
+    "continue": "continue",
+    "block": "{ break }",
+    "if_both": "(if i == 0 { break } else { continue })",
+    "match": "match i { _ => break }",
+}
+BINARY_OPERANDS = {
+    **{op: "1" for op in ("+", "-", "*", "/", "%", "==", "!=", "<", "<=", ">", ">=")},
+    "&&": "true",
+    "||": "false",
+}
+NEVER_INITS = [
+    (f"{form}_{op}_{side}", init)
+    for form, never in NEVER_FORMS.items()
+    for op, other in BINARY_OPERANDS.items()
+    for side, init in (
+        ("left", f"{never} {op} {other}"),
+        ("right", f"{other} {op} {never}"),
+        ("both", f"{never} {op} {never}"),
+    )
+] + [
+    (f"{form}_{op}_unary", f"{op}{never}") for form, never in NEVER_FORMS.items() for op in ("-", "!")
+] + [
+    ("float_operand", "break * 2.0"),
+    ("str_operand", 'break + "s"'),
+]
+
+
+@pytest.mark.parametrize("init", [i for _, i in NEVER_INITS], ids=[n for n, _ in NEVER_INITS])
+def test_operator_with_a_never_operand(init: str) -> None:
+    assert main(f'for i in 0..2 {{ let x = {init}; }} print("end");') == "end\n"
+
+
+NEVER_COMPOUNDS = [
+    (f"{form}_{op}_{side}", stmts)
+    for form, never in NEVER_FORMS.items()
+    for op in ("+=", "-=", "*=", "/=", "%=")
+    for side, stmts in (
+        ("target", f"let mut x = {never}; x {op} 1;"),
+        ("value", f"let mut x = 1; x {op} {never};"),
+        ("both", f"let mut x = {never}; x {op} {never};"),
+    )
+]
+
+
+@pytest.mark.parametrize("stmts", [s for _, s in NEVER_COMPOUNDS], ids=[n for n, _ in NEVER_COMPOUNDS])
+def test_compound_assignment_with_a_never_operand(stmts: str) -> None:
+    assert main(f'for i in 0..2 {{ {stmts} }} print("end");') == "end\n"
+
+
+def test_never_left_operand_skips_the_right_operand() -> None:
+    src = 'fn noisy() -> Int { print("ran"); 1 }\nfn main() { for i in 0..2 { let x = break + noisy(); } print("end"); }'
+    assert run(src) == "end\n"
+
+
+def test_never_right_operand_still_runs_the_left_operand() -> None:
+    src = 'fn noisy() -> Int { print("ran"); 1 }\nfn main() { for i in 0..2 { let x = noisy() + break; } print("end"); }'
+    assert run(src) == "ran\nend\n"
+
+
+def test_panic_as_left_operand_panics() -> None:
+    with pytest.raises(VexRuntimeError, match="boom"):
+        main('let x = panic("boom") + 1;')
