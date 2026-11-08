@@ -132,6 +132,10 @@ def too_deep_error(exc: RecursionError, source: Source) -> VexError:
                                 "simplify the deepest expression")])  # fmt: skip
 
 
+def out_of_memory_error(source: Source) -> VexError:
+    return VexError([Diagnostic("out-of-memory", "not enough memory to compile this program", Span(source, 0, 1))])
+
+
 class VexRuntimeError(Exception):
     """A runtime failure with a source-mapped stack trace."""
 

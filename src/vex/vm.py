@@ -92,6 +92,8 @@ from vex.runtime import (
 
 MAX_DEPTH = 100_000
 _DONE = object()
+_TOO_DEEP = "recursion too deep (a deeply nested value, or calls nested through builtins such as `map`)"
+_OUT_OF_MEMORY = "out of memory"
 
 
 class VM:
@@ -127,7 +129,10 @@ class VM:
             raise VexRuntimeError(e.message, trace) from None
         except RecursionError:
             self.frames.clear()
-            raise VexRuntimeError("recursion too deep while comparing or printing a value") from None
+            raise VexRuntimeError(_TOO_DEEP) from None
+        except MemoryError:
+            self.frames.clear()
+            raise VexRuntimeError(_OUT_OF_MEMORY) from None
 
     def make_trace(self, code: Code, pc: int, frames: list[Any]) -> list[tuple[str, Span | None]]:
         trace: list[tuple[str, Span | None]] = [(code.name, _span_at(code, pc))]
@@ -484,6 +489,14 @@ class VM:
             if e.trace is None:
                 e.trace = self.make_trace(code, pc - 1, frames)
             raise
+        except (RecursionError, MemoryError) as e:
+            # The one deliberate last-resort boundary. These two are not hostile arguments to one builtin:
+            # any instruction can allocate, and comparing, printing or calling back can recurse, wherever
+            # the Python stack or the heap happens to run out. Catching them here is what locates them.
+            # make_trace may hit the same limit; the next `execute` out, with more stack, then handles it.
+            panic = VexPanic(_TOO_DEEP if isinstance(e, RecursionError) else _OUT_OF_MEMORY)
+            panic.trace = self.make_trace(code, pc - 1, frames)
+            raise panic from None
 
 
 def _span_at(code: Code, pc: int) -> Span | None:

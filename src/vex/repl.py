@@ -13,6 +13,7 @@ from vex.diagnostics import (
     VexError,
     VexRuntimeError,
     first_undecodable,
+    out_of_memory_error,
     render_all,
     too_deep_error,
 )
@@ -209,10 +210,10 @@ class Session:
         self.count += 1
         source = _source_of_input(f"<repl:{self.count}>", text)
         sink = DiagSink()
-        mod = parse_source(source, sink, repl=True)
-        sink.raise_if_errors()
         snap = _snapshot(self.env)
         try:
+            mod = parse_source(source, sink, repl=True)
+            sink.raise_if_errors()
             resolver = Resolver(self.env, sink, repl=True)
             fns = resolver.resolve_modules([mod])
             repl_fn = resolver.resolve_repl(mod)
@@ -228,6 +229,9 @@ class Session:
         except RecursionError as e:
             _restore(self.env, snap)
             raise too_deep_error(e, source) from None
+        except MemoryError:
+            _restore(self.env, snap)
+            raise out_of_memory_error(source) from None
         if repl_fn is None:
             return ""
         assert repl_fn.ret is not None

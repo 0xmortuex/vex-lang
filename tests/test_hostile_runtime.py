@@ -6,18 +6,28 @@ import io
 import subprocess
 import sys
 import time
+from collections.abc import Iterator
 from typing import Any
 
 import pytest
 from helpers import run_body, run_source
 
-from vex import cli, runtime, stdlib
+from vex import api, cli, repl, runtime, stdlib
 from vex.api import compile_text
-from vex.diagnostics import VexRuntimeError
+from vex.diagnostics import VexError, VexRuntimeError
 from vex.vm import VM
 
 MIN = "(0 - 9223372036854775807 - 1)"
 MAX = "9223372036854775807"
+
+
+@pytest.fixture(autouse=True)
+def default_recursion_limit() -> Iterator[None]:
+    """cli.main raises the limit for the process; these tests depend on hitting the ordinary one."""
+    before = sys.getrecursionlimit()
+    sys.setrecursionlimit(1000)
+    yield
+    sys.setrecursionlimit(before)
 
 
 def panics(body: str, fragment: str, prelude: str = "") -> VexRuntimeError:
@@ -432,3 +442,102 @@ def test_read_line_over_the_limit_is_a_located_error(monkeypatch: pytest.MonkeyP
     panics("print(io.read_line());", "input line too long")
     monkeypatch.setattr(sys, "stdin", io.StringIO("x" * 9 + "\n"))
     assert run_body("print(io.read_line().unwrap().len());") == "9\n"
+
+
+# ---------------------------------------------------------------- exhausting the Python stack or the heap
+DEEP = "struct N { kids: List[N] }\nfn deep(n: Int) -> N { let mut c = N { kids: [] }; for i in 0..n { c = N { kids: [c] }; } c }\n"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "print(deep(5000));",
+        "print(deep(5000) == deep(5000));",
+        'print("{deep(5000)}");',
+        "assert_eq(deep(5000), deep(5001));",
+        "let mut n = N { kids: [] }; n.kids.push(n); print(n);",
+        "let mut a = N { kids: [] }; let mut b = N { kids: [] }; a.kids.push(b); b.kids.push(a); print(a == b);",
+    ],
+    ids=["print", "equal", "interpolate", "assert_eq", "print-cycle", "equal-cycle"],
+)
+def test_too_deep_value_is_a_located_error(body: str) -> None:
+    panics(body, "recursion too deep", DEEP)
+
+
+@pytest.mark.parametrize(
+    "callback",
+    ["[n].map(|x| r(x + 1))[0]", "[n].fold(0, |a, x| r(x + 1))", "[n].filter(|x| r(x + 1) > 0).len()"],
+    ids=["map", "fold", "filter"],
+)
+def test_recursion_through_builtins_is_a_located_error(callback: str) -> None:
+    with pytest.raises(VexRuntimeError) as info:
+        run_source(f"fn r(n: Int) -> Int {{ {callback} }}\nfn main() {{\nprint(r(0));\n}}\n")
+    assert "recursion too deep" in info.value.message
+    assert info.value.trace[0][1] is not None
+    assert info.value.trace[-1][1] is not None and info.value.trace[-1][1].line == 3
+
+
+def out_of_memory(*args: object, **kwargs: object) -> object:
+    raise MemoryError
+
+
+def test_running_out_of_memory_in_a_builtin_is_a_located_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(stdlib.METHODS["Str"]["upper"], "impl", out_of_memory)
+    panics('print("a".upper());', "out of memory")
+
+
+def test_running_out_of_memory_in_a_callback_is_located_there(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(stdlib.METHODS["Str"]["upper"], "impl", out_of_memory)
+    with pytest.raises(VexRuntimeError) as info:
+        run_source('fn main() {\nprint(["a"].map(|s| s.upper()));\n}\n')
+    assert info.value.message == "out of memory"
+    assert [name for name, _ in info.value.trace] == ["<lambda>", "main"]
+
+
+def test_vm_is_reusable_after_running_out_of_memory(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(stdlib.METHODS["Str"]["upper"], "impl", out_of_memory)
+    session = repl.Session(io.StringIO())
+    with pytest.raises(VexRuntimeError):
+        session.eval('"a".upper()')
+    assert session.vm.frames == []
+    assert session.eval("1 + 1") == "2 : Int"
+
+
+def test_running_out_of_memory_while_compiling_is_a_diagnostic(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(api.Checker, "check_all", out_of_memory)
+    with pytest.raises(VexError) as info:
+        compile_text("fn main() {}", "<t>")
+    assert [d.code for d in info.value.diagnostics] == ["out-of-memory"]
+    assert info.value.diagnostics[0].span is not None
+
+
+@pytest.mark.parametrize("stage", ["parse_source", "Checker.check_all"])
+def test_running_out_of_memory_while_compiling_in_the_repl_keeps_the_session(stage: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    out = io.StringIO()
+    session = repl.Session(out)
+    session.handle("let keep = 41;")
+    if stage == "parse_source":
+        monkeypatch.setattr(repl, "parse_source", out_of_memory)
+    else:
+        monkeypatch.setattr(repl.Checker, "check_all", out_of_memory)
+    session.handle("keep")
+    monkeypatch.undo()
+    session.handle("keep + 1")
+    assert "error[out-of-memory]" in out.getvalue()
+    assert "42 : Int" in out.getvalue()
+
+
+def test_source_file_too_large_to_read_is_an_os_error(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
+    class Huge:
+        def __enter__(self) -> Huge:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            pass
+
+        def read(self) -> bytes:
+            raise MemoryError
+
+    monkeypatch.setattr(api, "open", lambda *a, **k: Huge(), raising=False)
+    with pytest.raises(OSError, match="too large"):
+        api.read_source(str(tmp_path / "x.vx"))
