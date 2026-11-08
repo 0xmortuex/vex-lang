@@ -238,6 +238,17 @@ there is no direct path in either direction; Mort could only spawn `vex` as a su
 - **Depends on:** nothing.
 - **Files:** `src/vex/resolver.py`, `src/vex/checker.py`, `tests/errors/`.
 
+### 16. Super-linear time after parsing on large inputs
+
+- **Missing:** Later compile stages take super-linear time on some large but valid-looking inputs. Measured during
+  verification of the lexer and parser fuzz work: 12,500 duplicate `match` arms took over 30 s, and a 10,000-variant
+  enum in an 89 KB file took 9.6 s.
+- **Why it matters:** A small file can occupy the compiler for tens of seconds. The hostile fuzz does not reach this,
+  because its inputs are too small and its limit is per input.
+- **Size:** Not estimated. Profile both inputs first; this is separate from the exponential cases in gap 7.
+- **Depends on:** nothing.
+- **Files:** Not yet identified; start with `src/vex/exhaust.py` and `src/vex/checker.py`.
+
 ## What Vex is distinctive at, compared with Mort (facts only)
 
 Vex facts were measured here. Mort facts come from reading its `README.md`, `docs/language-specification.md`, `CLAUDE.md` and `mortc.py`; Mort was not run for this audit.
