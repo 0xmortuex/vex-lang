@@ -134,6 +134,18 @@ class VM:
             self.frames.clear()
             raise VexRuntimeError(_OUT_OF_MEMORY) from None
 
+    def show_result(self, code: Code, value: Any) -> str:
+        """Format the value of a finished REPL input; a failure is located at that input, as a panic would be."""
+        try:
+            return display(value, False)
+        except VexPanic as e:
+            message = e.message
+        except RecursionError:
+            message = _TOO_DEEP
+        except MemoryError:
+            message = _OUT_OF_MEMORY
+        raise VexRuntimeError(message, [(code.name, _span_at(code, len(code.spans) - 1))])
+
     def make_trace(self, code: Code, pc: int, frames: list[Any]) -> list[tuple[str, Span | None]]:
         trace: list[tuple[str, Span | None]] = [(code.name, _span_at(code, pc))]
         for fcode, fpc, _, _ in reversed(frames):
@@ -478,7 +490,10 @@ class VM:
                         cap = []
                     push(Closure(fcode, cap))
                 elif op == LOAD_GLOBAL:
-                    push(self.globals[arg])
+                    try:
+                        push(self.globals[arg])
+                    except KeyError:  # an earlier REPL input panicked before this `let` ran
+                        raise VexPanic(f"`{arg.partition('#')[0]}` has no value: its `let` did not finish") from None
                 elif op == STORE_GLOBAL:
                     self.globals[arg] = pop()
                 elif op == PANIC:

@@ -541,3 +541,56 @@ def test_source_file_too_large_to_read_is_an_os_error(monkeypatch: pytest.Monkey
     monkeypatch.setattr(api, "open", lambda *a, **k: Huge(), raising=False)
     with pytest.raises(OSError, match="too large"):
         api.read_source(str(tmp_path / "x.vx"))
+
+
+# ---------------------------------------------------------------- what only the REPL can reach
+def in_repl(*inputs: str) -> str:
+    out = io.StringIO()
+    session = repl.Session(out)
+    for text in inputs:
+        session.handle(text)
+    return out.getvalue()
+
+
+@pytest.mark.parametrize(
+    "use",
+    ["a", "a + 1", "fn g() -> Int { a }\ng()"],
+    ids=["read", "operand", "through-a-function"],
+)
+def test_a_global_whose_let_panicked_is_a_located_error(use: str) -> None:
+    text = in_repl('let a: Int = panic("first");', use, "1 + 1")
+    assert "first" in text
+    assert "`a` has no value" in text
+    assert "<repl:2>" in text
+    assert text.rstrip().endswith("2 : Int")
+
+
+def test_compound_assignment_to_a_global_whose_let_panicked() -> None:
+    text = in_repl('let mut a: Int = panic("first");', "a += 1;", "a = 5;", "a")
+    assert "`a` has no value" in text
+    assert text.rstrip().endswith("5 : Int")
+
+
+def test_earlier_statements_of_a_failed_input_keep_their_values() -> None:
+    text = in_repl('let a = 1; let b: Int = panic("first");', "a", "b")
+    assert "1 : Int" in text and "`b` has no value" in text
+
+
+def test_echoing_a_value_too_deep_to_display_is_a_located_error() -> None:
+    prelude = "struct N { kids: List[N] }"
+    build = "let mut c = N { kids: [] };\nfor i in 0..5000 { c = N { kids: [c] }; }\nc"
+    text = in_repl(prelude, build, "1 + 1")
+    assert "runtime error: recursion too deep" in text and "<repl:2>" in text
+    assert text.rstrip().endswith("2 : Int")
+
+
+def test_echoing_a_value_too_large_to_display_is_a_located_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(runtime, "MAX_STR_LEN", 10)
+    text = in_repl("[1, 2, 3, 4, 5, 6]")
+    assert "runtime error: value is too large to display" in text and "<repl:1>" in text
+
+
+def test_running_out_of_memory_while_echoing_is_a_located_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("vex.vm.display", out_of_memory)
+    text = in_repl("1 + 1")
+    assert "runtime error: out of memory" in text and "<repl:1>" in text

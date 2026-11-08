@@ -19,7 +19,7 @@ from vex.diagnostics import (
 )
 from vex.parser import parse_source
 from vex.resolver import Resolver, make_env
-from vex.runtime import VexExit, display
+from vex.runtime import VexExit
 from vex.symbols import Env
 from vex.vm import VM
 from vex.vtypes import is_unit, show, zonk
@@ -241,7 +241,7 @@ class Session:
         value = self.vm.run_function(repl_fn.code)
         if mod.tail is None or is_unit(ret):
             return ""
-        return f"{display(value, False)} : {show(ret)}"
+        return f"{self.vm.show_result(repl_fn.code, value)} : {show(ret)}"
 
     def handle(self, text: str, run: bool = True) -> None:
         """Evaluate and print results/diagnostics to the session output."""
