@@ -1,0 +1,6 @@
+// expect: bad-operand 5:13
+struct S { f: fn() -> Int }
+fn g() -> Int { 1 }
+fn main() {
+    let x = S { f: g } == S { f: g };
+}

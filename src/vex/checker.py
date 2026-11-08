@@ -62,7 +62,24 @@ def _head(t: Type) -> str | None:
     return t.name if isinstance(t, TCon) else None
 
 
-def satisfies(t: Type, bound: str) -> bool:
+def holds_function(name: str, env: Env, seen: set[str]) -> bool:
+    """Does a value of the user type ``name`` contain a function, in a field or payload at any depth?"""
+    if name in seen:
+        return False
+    seen.add(name)
+    fields: list[Type] = []
+    if name in env.structs:
+        fields = [ty for _, ty in env.structs[name].fields]
+    elif name in env.enums:
+        fields = [ty for v in env.enums[name].variants for ty in v.fields]
+    for field in fields:
+        for x in walk(field):
+            if isinstance(x, TFn) or (isinstance(x, TCon) and holds_function(x.name, env, seen)):
+                return True
+    return False
+
+
+def satisfies(t: Type, bound: str, env: Env | None = None) -> bool:
     t = prune(t)
     if isinstance(t, (TError, TNever, TVar)):
         return True
@@ -74,9 +91,11 @@ def satisfies(t: Type, bound: str) -> bool:
         if isinstance(t, TCon):
             if t.name in ("Range",):
                 return True
-            return all(satisfies(a, "Eq") for a in t.args)
+            if env is not None and holds_function(t.name, env, set()):
+                return False
+            return all(satisfies(a, "Eq", env) for a in t.args)
         if isinstance(t, TTuple):
-            return all(satisfies(a, "Eq") for a in t.items)
+            return all(satisfies(a, "Eq", env) for a in t.items)
         return True
     if bound == "Ord":
         if isinstance(t, TParam):
@@ -256,18 +275,21 @@ class Checker:
                          "expected Int, Float or Str")  # fmt: skip
         elif k.startswith("bound:"):
             b = k[6:]
-            if not satisfies(t, b):
+            if not satisfies(t, b, self.env):
                 self.err("unsatisfied-bound", f"type `{show(t)}` does not satisfy the bound `{b}`", d.span,
                          f"required by `{d.extra}`" if d.extra else "")  # fmt: skip
         elif k == "eq":
-            if not satisfies(t, "Eq"):
+            if not satisfies(t, "Eq", self.env):
                 self.err("bad-operand", f"cannot compare values of type `{show(t)}` with `{d.extra}`", d.span,
-                         "functions cannot be compared" if any(isinstance(x, TFn) for x in walk(t))
+                         "functions cannot be compared" if self.contains_function(t)
                          else "this type has no equality here (declare `T: Eq`)")  # fmt: skip
         elif k == "ord":
             if not satisfies(t, "Ord"):
                 self.err("bad-operand", f"cannot order values of type `{show(t)}` with `{d.extra}`", d.span,
                          "only Int, Float, Str, Bool, tuples and lists of those can be ordered")  # fmt: skip
+
+    def contains_function(self, t: Type) -> bool:
+        return any(isinstance(x, TFn) or (isinstance(x, TCon) and holds_function(x.name, self.env, set())) for x in walk(t))
 
     # ------------------------------------------------------------ reporting helpers
     def mismatch(self, expected: Type, actual: Type, span: Span, note: str | None = None,
