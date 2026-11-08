@@ -117,6 +117,21 @@ class VexError(Exception):
         self.diagnostics = diagnostics
 
 
+def too_deep_error(exc: RecursionError, source: Source) -> VexError:
+    """A too-deep diagnostic at the innermost syntax node that was being processed when ``exc`` was raised."""
+    span = Span(source, 0, 1)
+    tb = exc.__traceback__
+    while tb is not None:
+        for value in tb.tb_frame.f_locals.values():
+            candidate = getattr(value, "span", None)
+            if isinstance(candidate, Span):
+                span = candidate
+                break
+        tb = tb.tb_next
+    return VexError([Diagnostic("too-deep", "program is nested too deeply to compile", span,
+                                "simplify the deepest expression")])  # fmt: skip
+
+
 class VexRuntimeError(Exception):
     """A runtime failure with a source-mapped stack trace."""
 

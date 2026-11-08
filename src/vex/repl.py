@@ -6,7 +6,15 @@ from typing import TextIO
 
 from vex.checker import Checker
 from vex.compiler import Compiler
-from vex.diagnostics import DiagSink, Source, VexError, VexRuntimeError, first_undecodable, render_all
+from vex.diagnostics import (
+    DiagSink,
+    Source,
+    VexError,
+    VexRuntimeError,
+    first_undecodable,
+    render_all,
+    too_deep_error,
+)
 from vex.lexer import Lexer
 from vex.parser import parse_source
 from vex.resolver import Resolver, make_env
@@ -92,11 +100,14 @@ class Session:
                 fns = [*fns, repl_fn]
             Checker(self.env, sink).check_all(fns)
             sink.raise_if_errors()
+            self.env.fns.pop("__repl__", None)
+            self.compiler.compile_functions(fns)
         except VexError:
             _restore(self.env, snap)
             raise
-        self.env.fns.pop("__repl__", None)
-        self.compiler.compile_functions(fns)
+        except RecursionError as e:
+            _restore(self.env, snap)
+            raise too_deep_error(e, source) from None
         if repl_fn is None:
             return ""
         assert repl_fn.ret is not None

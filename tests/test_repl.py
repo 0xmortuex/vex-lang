@@ -268,3 +268,13 @@ def test_repl_keeps_working_after_invalid_utf8() -> None:
 def test_invalid_utf8_discards_the_unfinished_input() -> None:
     _, out = repl_on_bytes(b"(\n\xff\n1 + 1\n")
     assert "invalid-utf8" in out and "2 : Int" in out
+
+
+def test_too_deep_input_is_a_diagnostic_and_keeps_the_session() -> None:
+    out = io.StringIO()
+    session = Session(out)
+    session.handle("let keep = 41;")
+    session.handle("\n" + "+".join(["1"] * 40_000))
+    assert "too-deep" in out.getvalue() and "<repl:2>:2:1" in out.getvalue()
+    session.handle("keep + 1")
+    assert "42 : Int" in out.getvalue()

@@ -10,7 +10,7 @@ from vex import syntax as ast
 from vex.bytecode import Code, all_code, disassemble
 from vex.checker import Checker
 from vex.compiler import Compiler
-from vex.diagnostics import Diagnostic, DiagSink, Source, Span, VexError
+from vex.diagnostics import Diagnostic, DiagSink, Source, VexError, too_deep_error
 from vex.parser import parse_source
 from vex.resolver import Resolver, make_env
 from vex.symbols import Env, FnSym
@@ -119,9 +119,8 @@ def compile_source(source: Source, require_main: bool = True) -> Program:
     """Compile a source file (and its imports). Raises VexError with all diagnostics."""
     try:
         return _compile(source, require_main)
-    except RecursionError:
-        raise VexError([Diagnostic("too-deep", "program is nested too deeply to compile",
-                                   Span(source, 0, 1), "simplify the deepest expression")]) from None  # fmt: skip
+    except RecursionError as e:
+        raise too_deep_error(e, source) from None
 
 
 def _compile(source: Source, require_main: bool) -> Program:

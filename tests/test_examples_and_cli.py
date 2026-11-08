@@ -300,3 +300,11 @@ def test_program_reading_invalid_utf8_stdin_gets_a_runtime_error(tmp_path: pathl
     assert proc.returncode == 2, proc.stderr[-500:]
     assert b"not valid UTF-8" in proc.stderr
     assert b"internal compiler error" not in proc.stderr
+
+
+def test_cli_compile_stage_overflow_reports_the_real_location(tmp_path: pathlib.Path) -> None:
+    path = tmp_path / "chain.vx"
+    path.write_text("fn main() {\n  print(" + "+".join(["1"] * 40_000) + ");\n}\n", encoding="utf-8")
+    proc = vex("check", str(path))
+    assert proc.returncode == 1, proc.stderr[-500:]
+    assert "too-deep" in proc.stderr and "chain.vx:2:9" in proc.stderr

@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import pathlib
+
 import pytest
 
 from vex import syntax as ast
-from vex.diagnostics import DiagSink, Source
+from vex.api import compile_file, compile_text
+from vex.diagnostics import DiagSink, Source, VexError
 from vex.parser import parse_source
 
 
@@ -406,3 +409,29 @@ def test_runaway_nesting_reports_where_it_happened(src: str) -> None:
     assert deep[0].span is not None
     assert deep[0].span.line >= 2, "the position must be in the nested code, not the start of the file"
     deep[0].render()
+
+
+# ---------------------------------------------------------------- compile-stage recursion limits
+@pytest.mark.parametrize(
+    "tail",
+    ["+".join(["1"] * 40_000), "x" + ".a()" * 40_000],
+    ids=["binary-chain", "method-chain"],
+)
+def test_compile_stage_overflow_reports_the_real_location(tail: str) -> None:
+    src = "fn main() {\n\n  let x = " + tail + ";\n}\n"
+    with pytest.raises(VexError) as info:
+        compile_text(src, "<t>")
+    d = info.value.diagnostics[0]
+    assert d.code == "too-deep"
+    assert d.span is not None and (d.span.line, d.span.col) == (3, 11)
+
+
+def test_compile_stage_overflow_in_an_import_names_that_file(tmp_path: pathlib.Path) -> None:
+    (tmp_path / "deep.vx").write_text("fn f() {\n  let x = " + "+".join(["1"] * 40_000) + ";\n}\n", encoding="utf-8")
+    main = tmp_path / "main.vx"
+    main.write_text("import deep;\nfn main() {}\n", encoding="utf-8")
+    with pytest.raises(VexError) as info:
+        compile_file(str(main))
+    d = info.value.diagnostics[0]
+    assert d.code == "too-deep" and d.span is not None
+    assert d.span.source.path.endswith("deep.vx") and d.span.line == 2
