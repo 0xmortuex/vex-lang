@@ -1,0 +1,212 @@
+// Order pricing with its rules in Vex: Mort owns the orders and the tax table, Vex decides the price.
+// The script list comes from the environment, so the same binary runs any set of rule files.
+
+import vex;
+import std.env as env;
+
+extern fn strcmp(a: *const c_char, b: *const c_char) -> c_int;
+
+struct Order {
+    customer: *u8,
+    quantity: i64,
+    unit_cents: i64,
+}
+
+struct Line {
+    data: *u8,
+    at: u64,
+}
+
+let mort_to_vex: i64 = 0;
+let vex_to_mort: i64 = 0;
+
+const MAX_LINE: u64 = 2048;
+const MAX_SCRIPT: u64 = 65536;
+
+fn new_line() -> Line {
+    return Line { data: alloc(MAX_LINE) as *u8, at: 0 };
+}
+
+fn say(line: *Line, text: *u8) -> void {
+    let buffer: []u8 = slice((*line).data, MAX_LINE);
+    (*line).at = vex.write_text(buffer, (*line).at, text);
+}
+
+fn say_int(line: *Line, value: i64) -> void {
+    let buffer: []u8 = slice((*line).data, MAX_LINE);
+    (*line).at = vex.write_i64(buffer, (*line).at, value);
+}
+
+fn end(line: *Line) -> void {
+    let buffer: []u8 = slice((*line).data, MAX_LINE);
+    buffer[(*line).at] = 0;
+    println((*line).data);
+    (*line).at = 0;
+}
+
+// host.tax_cents(amount): Mort's tax table, called from Vex.
+fn tax_cents(vm: *void, ctx: *void, argv: *VexValue, argc: i64, ret: *VexValue) -> i64 {
+    vex_to_mort = vex_to_mort + 1;
+    let amount: i64 = vex.arg_int(argv, 0);
+    let tax: i64 = amount * 8 / 100;
+    let line: Line = new_line();
+    say(&line, "    Vex -> Mort tax_cents(");
+    say_int(&line, amount);
+    say(&line, ") = ");
+    say_int(&line, tax);
+    end(&line);
+    return vex.return_int(ret, tax);
+}
+
+// host.customer_tier(id): a Str crossing both ways. An unknown customer fails the script with Mort's message.
+fn customer_tier(vm: *void, ctx: *void, argv: *VexValue, argc: i64, ret: *VexValue) -> i64 {
+    vex_to_mort = vex_to_mort + 1;
+    let api: *VexApi = ctx as *VexApi;
+    let id: *u8 = vex.arg_str(argv, 0);
+    let tier: *u8 = 0 as *u8;
+    if strcmp(id as *const c_char, "C-100" as *const c_char) == 0 {
+        tier = "gold";
+    } else if strcmp(id as *const c_char, "C-200" as *const c_char) == 0 {
+        tier = "silver";
+    } else if strcmp(id as *const c_char, "C-300" as *const c_char) == 0 {
+        tier = "bronze";
+    }
+    let line: Line = new_line();
+    say(&line, "    Vex -> Mort customer_tier(\"");
+    say(&line, id);
+    if tier == (0 as *u8) {
+        say(&line, "\") = no such customer");
+        end(&line);
+        vex.fail(api, vm, "Mort: no such customer");
+        return 1;
+    }
+    say(&line, "\") = ");
+    say(&line, tier);
+    end(&line);
+    vex.return_str(api, vm, ret, tier, vex.c_len(tier));
+    return 0;
+}
+
+// Read a whole file. Returns (buffer, length, ok).
+fn read_script(path: *u8) -> (*u8, i64, bool) {
+    let buffer: *u8 = alloc(MAX_SCRIPT) as *u8;
+    let handle: *void = file_open(path, "rb");
+    if handle == (0 as *void) {
+        return (buffer, 0, false);
+    }
+    let size: u64 = file_read(handle, buffer, MAX_SCRIPT);
+    file_close(handle);
+    return (buffer, size as i64, true);
+}
+
+fn price_order(api: *VexApi, vm: *void, order: Order) -> void {
+    let line: Line = new_line();
+    say(&line, "  Mort -> Vex price(");
+    say_int(&line, order.quantity);
+    say(&line, ", ");
+    say_int(&line, order.unit_cents);
+    say(&line, ", \"");
+    say(&line, order.customer);
+    say(&line, "\")");
+    end(&line);
+
+    let argv: [VexValue; 3] = [
+        vex.of_int(order.quantity),
+        vex.of_int(order.unit_cents),
+        vex.of_cstr(order.customer),
+    ];
+    let result: VexValue = vex.of_unit();
+    mort_to_vex = mort_to_vex + 1;
+    let status: i64 = vex.call(api, vm, "price", &argv[0], 3, &result);
+    if status == 0 {
+        say(&line, "  <- ");
+        say_int(&line, result.i);
+        say(&line, " cents");
+        end(&line);
+    } else {
+        say(&line, "  <- status ");
+        say_int(&line, status);
+        say(&line, " (");
+        say(&line, vex.status_name(status));
+        say(&line, "), host continues:");
+        end(&line);
+        println(vex.error(api, vm));
+    }
+}
+
+fn run_rules(api: *VexApi, path: *u8, orders: *Order, count: i64) -> void {
+    let line: Line = new_line();
+    mort_to_vex = 0;
+    vex_to_mort = 0;
+    say(&line, "== rules: ");
+    say(&line, path);
+    end(&line);
+
+    let vm: *void = vex.open(api, 0);
+    assert(vm != (0 as *void));
+    vex.budget(api, vm, 1000000);
+    assert(vex.bind(api, vm, "tax_cents", "(Int) -> Int", api as *void, tax_cents) == 0);
+    assert(vex.bind(api, vm, "customer_tier", "(Str) -> Str", api as *void, customer_tier) == 0);
+
+    let script: (*u8, i64, bool) = read_script(path);
+    if !script.2 {
+        say(&line, "  cannot read the script");
+        end(&line);
+        vex.close(api, vm);
+        return;
+    }
+    let status: i64 = vex.load(api, vm, path, script.0, script.1);
+    say(&line, "  load status ");
+    say_int(&line, status);
+    say(&line, " (");
+    say(&line, vex.status_name(status));
+    say(&line, ")");
+    end(&line);
+    if status != 0 {
+        println(vex.error(api, vm));
+        vex.close(api, vm);
+        return;
+    }
+    let all: []Order = slice(orders, count as u64);
+    for index: u64 in 0..(count as u64) {
+        price_order(api, vm, all[index]);
+    }
+    vex.close(api, vm);
+    say(&line, "  calls: Mort -> Vex ");
+    say_int(&line, mort_to_vex);
+    say(&line, ", Vex -> Mort ");
+    say_int(&line, vex_to_mort);
+    end(&line);
+}
+
+fn main() -> int {
+    let api: *VexApi = vex.start();
+    if (*api).ready != 1 {
+        println("the Vex runtime did not attach");
+        return 1;
+    }
+    let orders: [Order; 5] = [
+        Order { customer: "C-100", quantity: 3, unit_cents: 1250 },
+        Order { customer: "C-200", quantity: 10, unit_cents: 999 },
+        Order { customer: "C-300", quantity: 1, unit_cents: 450000 },
+        Order { customer: "C-100", quantity: 2000000, unit_cents: 1250 },
+        Order { customer: "C-404", quantity: 1, unit_cents: 100 },
+    ];
+    let rules: *u8 = env.get("VEX_DEMO_RULES");
+    if rules == (0 as *u8) {
+        println("set VEX_DEMO_RULES to a ;-separated list of .vx files");
+        return 1;
+    }
+    let total: u64 = len(rules);
+    let text: []u8 = slice(rules, total + 1);
+    let start: u64 = 0;
+    for index: u64 in 0..=total {
+        if index == total || text[index] == 59 {
+            text[index] = 0;
+            run_rules(api, (rules as u64 + start) as *u8, &orders[0], 5);
+            start = index + 1;
+        }
+    }
+    vex.stop();
+    return 0;
+}

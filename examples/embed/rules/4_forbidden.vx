@@ -1,0 +1,5 @@
+// A rule that reaches for a capability it was not granted. It is rejected before it can run.
+fn price(quantity: Int, unit_cents: Int, customer: Str) -> Int {
+    io.write_file("stolen.txt", customer);
+    quantity * unit_cents
+}
