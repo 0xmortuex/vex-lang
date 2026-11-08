@@ -196,3 +196,52 @@ def test_line_and_column_mapping() -> None:
     assert src.line_text(2) == "cd"
     assert src.line_text(3) == ""
     assert src.line_text(99) == ""
+
+
+# ---------------------------------------------------------------- numeric literals are ASCII only
+def single_error(text: str) -> tuple[str, int, int]:
+    """Lex ``text``; return (code, line, col) of its one diagnostic."""
+    _, sink = lex(text)
+    assert len(sink.items) == 1, [d.message for d in sink.items]
+    d = sink.items[0]
+    assert d.span is not None
+    return d.code, d.span.line, d.span.col
+
+
+@pytest.mark.parametrize(
+    ("text", "code", "col"),
+    [
+        ("²", "unexpected-character", 1),  # superscript two: isdigit() yet int() refuses it
+        ("2²", "unexpected-character", 2),
+        ("٣", "unexpected-character", 1),  # Arabic-Indic three: int() would accept it
+        ("1٣", "unexpected-character", 2),
+        ("１", "unexpected-character", 1),  # fullwidth one
+        ("𝟗", "unexpected-character", 1),  # mathematical double-struck nine
+        ("0x٣", "bad-number", 1),
+        ("0b١", "bad-number", 1),
+        ("1.²", "unexpected-character", 3),
+        ("1e²", "bad-number", 1),
+    ],
+)
+def test_non_ascii_digits_are_diagnostics(text: str, code: str, col: int) -> None:
+    assert single_error(text) == (code, 1, col)
+
+
+def test_non_ascii_digit_reports_its_own_line() -> None:
+    assert single_error("let a = 1;\nlet b = ²;") == ("unexpected-character", 2, 9)
+
+
+def test_non_ascii_digit_in_signed_exponent() -> None:
+    _, sink = lex("1e+٣")
+    assert [d.code for d in sink.items] == ["bad-number", "unexpected-character"]
+
+
+def test_non_ascii_digit_is_not_a_numeric_value() -> None:
+    toks, _ = lex("1٣")
+    assert [(t.kind, t.value) for t in toks[:-1]] == [("INT", 1)]
+
+
+def test_identifiers_may_still_contain_non_ascii_digits() -> None:
+    toks, sink = lex("x² y٣")
+    assert not sink.items
+    assert [t.kind for t in toks[:-1]] == ["IDENT", "IDENT"]

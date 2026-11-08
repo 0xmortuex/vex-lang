@@ -21,6 +21,10 @@ PUNCT = [
 
 StrPart = str | tuple[int, int]
 
+# Numeric literals are ASCII only. str.isdigit() also accepts characters such as "²" and "٣".
+DIGITS = "0123456789"
+BASE_DIGITS = {2: "01", 8: "01234567", 16: DIGITS + "abcdefABCDEF"}
+
 ESCAPES = {"n": "\n", "t": "\t", "r": "\r", "0": "\0", "\\": "\\", '"': '"', "{": "{", "}": "}"}
 
 
@@ -54,7 +58,7 @@ class Lexer:
             if self.pos >= self.end:
                 break
             ch = self.text[self.pos]
-            if ch.isdigit():
+            if ch in DIGITS:
                 self._number()
             elif ch.isalpha() or ch == "_":
                 self._ident()
@@ -115,15 +119,15 @@ class Lexer:
             while self.pos < self.end and (t[self.pos].isalnum() or t[self.pos] == "_"):
                 self.pos += 1
             raw = t[digits_start : self.pos].replace("_", "")
-            try:
+            if raw and all(c in BASE_DIGITS[base] for c in raw):
                 value = int(raw, base)
-            except ValueError:
+            else:
                 self.error("bad-number", f"invalid base-{base} integer literal", start, self.pos,
                            "not a valid number")  # fmt: skip
                 value = 0
             self.tokens.append(Token("INT", t[start : self.pos], start, self.pos, value))
             return
-        while self.pos < self.end and (t[self.pos].isdigit() or t[self.pos] == "_"):
+        while self.pos < self.end and (t[self.pos] in DIGITS or t[self.pos] == "_"):
             self.pos += 1
         is_float = False
         # "1.5" is a float but "1..2" and "t.0.1" must not be.
@@ -131,20 +135,20 @@ class Lexer:
             not after_dot
             and self.pos + 1 < self.end
             and t[self.pos] == "."
-            and t[self.pos + 1].isdigit()
+            and t[self.pos + 1] in DIGITS
         ):
             is_float = True
             self.pos += 1
-            while self.pos < self.end and (t[self.pos].isdigit() or t[self.pos] == "_"):
+            while self.pos < self.end and (t[self.pos] in DIGITS or t[self.pos] == "_"):
                 self.pos += 1
         if not after_dot and self.pos < self.end and t[self.pos] in "eE":
             save = self.pos
             self.pos += 1
             if self.pos < self.end and t[self.pos] in "+-":
                 self.pos += 1
-            if self.pos < self.end and t[self.pos].isdigit():
+            if self.pos < self.end and t[self.pos] in DIGITS:
                 is_float = True
-                while self.pos < self.end and t[self.pos].isdigit():
+                while self.pos < self.end and t[self.pos] in DIGITS:
                     self.pos += 1
             else:
                 self.pos = save
