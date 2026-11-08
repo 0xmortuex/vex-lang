@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from typing import TextIO
+from typing import Any, TextIO
 
 from vex.checker import Checker
 from vex.compiler import Compiler
@@ -177,14 +177,74 @@ def _source_of_input(path: str, text: str) -> Source:
     return Source(path, clean, decode_error=(bad, ord(text[bad]) - 0xDC00))
 
 
-def _snapshot(e: Env) -> tuple[object, ...]:
-    return (dict(e.structs), dict(e.enums), dict(e.fns), dict(e.methods),
-            {k: list(v) for k, v in e.variants.items()}, list(e.fn_list), dict(e.globals),
-            dict(e.decl_spans))  # fmt: skip
+_MISSING = object()
 
 
-def _restore(e: Env, snap: tuple[object, ...]) -> None:
-    (e.structs, e.enums, e.fns, e.methods, e.variants, e.fn_list, e.globals, e.decl_spans) = snap  # type: ignore[assignment]
+class _Journal(dict[Any, Any]):
+    """A table of the environment that can undo the current input, at a cost set by what the input changed.
+
+    Copying the tables before each input made every input as expensive as the whole session. The stages
+    change them only through the methods overridden here.
+    """
+
+    def __init__(self, items: dict[Any, Any]) -> None:
+        super().__init__(items)
+        self.saved: dict[Any, Any] = {}
+
+    def remember(self, key: Any) -> None:
+        if key not in self.saved:
+            self.saved[key] = self.get(key, _MISSING)
+
+    def __setitem__(self, key: Any, value: Any) -> None:
+        self.remember(key)
+        super().__setitem__(key, value)
+
+    def pop(self, key: Any, *default: Any) -> Any:
+        self.remember(key)
+        return super().pop(key, *default)
+
+    def setdefault(self, key: Any, default: Any = None) -> Any:
+        self.remember(key)
+        return super().setdefault(key, default)
+
+    def rollback(self) -> None:
+        for key, value in self.saved.items():
+            if value is _MISSING:
+                super().pop(key, None)
+            else:
+                super().__setitem__(key, value)
+
+
+class _VariantJournal(_Journal):
+    """`variants` maps a name to a list that the resolver appends to in place, so the list's contents are saved."""
+
+    def setdefault(self, key: Any, default: Any = None) -> Any:
+        if key not in self.saved:
+            self.saved[key] = list(self[key]) if key in self else _MISSING
+        return dict.setdefault(self, key, default)
+
+
+class _EnvJournal:
+    """Puts undo in front of an Env's tables; `begin` starts an input and `rollback` undoes it."""
+
+    def __init__(self, env: Env) -> None:
+        self.env = env
+        env.structs, env.enums, env.fns, env.methods = (_Journal(env.structs), _Journal(env.enums), _Journal(env.fns),
+                                                        _Journal(env.methods))  # fmt: skip
+        env.globals, env.decl_spans = _Journal(env.globals), _Journal(env.decl_spans)
+        env.variants = _VariantJournal(env.variants)
+        self.tables = [env.structs, env.enums, env.fns, env.methods, env.globals, env.decl_spans, env.variants]
+        self.fn_count = 0
+
+    def begin(self) -> None:
+        for table in self.tables:
+            table.saved.clear()
+        self.fn_count = len(self.env.fn_list)
+
+    def rollback(self) -> None:
+        for table in self.tables:
+            table.rollback()
+        del self.env.fn_list[self.fn_count :]
 
 
 class Session:
@@ -197,6 +257,7 @@ class Session:
 
     def reset(self) -> None:
         self.env = make_env()
+        self.journal = _EnvJournal(self.env)
         self.vm = VM(self.out)
         self.compiler = Compiler(self.env)
         self.count = 0
@@ -210,7 +271,7 @@ class Session:
         self.count += 1
         source = _source_of_input(f"<repl:{self.count}>", text)
         sink = DiagSink()
-        snap = _snapshot(self.env)
+        self.journal.begin()
         try:
             mod = parse_source(source, sink, repl=True)
             sink.raise_if_errors()
@@ -224,13 +285,13 @@ class Session:
             self.env.fns.pop("__repl__", None)
             self.compiler.compile_functions(fns)
         except VexError:
-            _restore(self.env, snap)
+            self.journal.rollback()
             raise
         except RecursionError as e:
-            _restore(self.env, snap)
+            self.journal.rollback()
             raise too_deep_error(e, source) from None
         except MemoryError:
-            _restore(self.env, snap)
+            self.journal.rollback()
             raise out_of_memory_error(source) from None
         if repl_fn is None:
             return ""

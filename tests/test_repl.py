@@ -382,3 +382,65 @@ def test_input_finished_after_many_lines_still_runs() -> None:
 def test_invalid_utf8_resets_the_line_by_line_decision() -> None:
     _, out = repl_on_bytes(b'"abc\n\xff\n1 + 1\n')
     assert "invalid-utf8" in out and "2 : Int" in out
+
+
+# ---------------------------------------------------------------- a long session and its rollback
+def test_many_definitions_do_not_make_each_input_slower() -> None:
+    script = "".join(f"let x{i} = 1;\n" for i in range(32_000))
+    started = time.monotonic()
+    run_repl(io.StringIO(script), io.StringIO())
+    assert time.monotonic() - started < 20.0
+
+
+def fingerprint(s: Session) -> tuple[object, ...]:
+    """Which objects every table of the environment holds (rollback restores these exactly)."""
+    e = s.env
+    tables = (e.structs, e.enums, e.fns, e.methods, e.globals, e.decl_spans)
+    return (
+        tuple({k: id(v) for k, v in t.items()} for t in tables),
+        {k: [id(v) for v in vs] for k, vs in e.variants.items()},
+        [id(f) for f in e.fn_list],
+    )
+
+
+FAILING_INPUTS = [
+    'fn broken() -> Int { "s" }',
+    'let keep = 2; let bad: Int = "no";',
+    'struct S { a: Int } let y: Int = "no";',
+    'enum E { A, B } let y: Int = "no";',
+    'enum Other { Shared, Fresh } let y: Int = "no";',
+    'fn helper() -> Int { 2 } impl P { fn other(self) -> Int { 1 } fn get(self) -> Int { 2 } } let y: Int = "no";',
+    "undefined_name",
+    "fn broken() -> Int { undefined_name }",
+    "struct P { x: Int, y: Int }",
+    "let keep = 3; undefined_name",
+    "enum Q { Shared } undefined_name",
+]
+
+
+@pytest.mark.parametrize("failing", FAILING_INPUTS)
+def test_a_failed_input_restores_every_table_exactly(failing: str) -> None:
+    s, _ = session()
+    s.eval("struct P { x: Int }")
+    s.eval("impl P { fn get(self) -> Int { self.x } }")
+    s.eval("enum Q { Shared, Only }")
+    s.eval("fn helper() -> Int { 1 }")
+    s.eval("let keep = 1;")
+    before = fingerprint(s)
+    with pytest.raises(VexError):
+        s.eval(failing)
+    assert fingerprint(s) == before
+    assert s.eval("keep + helper() + P { x: 40 }.get()") == "42 : Int"
+    assert s.eval("Q.Only") == "Only : Q"
+
+
+def test_a_successful_input_after_a_failed_one_is_kept() -> None:
+    s, _ = session()
+    s.eval("let keep = 1;")
+    with pytest.raises(VexError):
+        s.eval("let keep = 2; undefined_name")
+    s.eval("let keep = 5;")
+    assert s.eval("keep") == "5 : Int"
+    with pytest.raises(VexError):
+        s.eval("let keep = 9; undefined_name")
+    assert s.eval("keep") == "5 : Int"
