@@ -307,3 +307,22 @@ def test_tuple_index_is_normalised() -> None:
     toks, sink = lex("t." + "0" * 5000 + "1")
     assert not sink.items
     assert toks[2].kind == "INT" and toks[2].text == "1" and toks[2].value == 1
+
+
+# ---------------------------------------------------------------- float literals are 64-bit
+@pytest.mark.parametrize(
+    "text",
+    ["1e999", "1E+309", "1.5e309", "1.8e308", "9" * 400 + ".0", "1e" + "9" * 5000, "1_0.0e999"],
+)
+def test_float_literal_too_large_is_a_range_diagnostic(text: str) -> None:
+    assert single_error("  " + text) == ("float-literal-range", 1, 3)
+
+
+@pytest.mark.parametrize(
+    ("text", "value"),
+    [("1.7976931348623157e308", 1.7976931348623157e308), ("1e-999", 0.0), ("0e999", 0.0), ("0.0e" + "9" * 5000, 0.0)],
+)
+def test_finite_floats_at_the_edges_are_accepted(text: str, value: float) -> None:
+    toks, sink = lex(text)
+    assert not sink.items
+    assert toks[0].kind == "FLOAT" and toks[0].value == value

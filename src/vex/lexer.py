@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 from vex.diagnostics import DiagSink, Source, Span
@@ -174,7 +175,13 @@ class Lexer:
             self.error("bad-number", "invalid suffix on number literal", start, self.pos,
                        f"`{t[tail:self.pos]}` is not a valid suffix")  # fmt: skip
         if is_float:
-            self.tokens.append(Token("FLOAT", raw, start, self.pos, float(raw)))
+            number = float(raw)
+            if math.isinf(number):
+                self.error("float-literal-range", "float literal is out of range", start, self.pos,
+                           "too large for a 64-bit Float",
+                           "the largest Float is about 1.8e308")  # fmt: skip
+                number = 0.0
+            self.tokens.append(Token("FLOAT", raw, start, self.pos, number))
         else:
             value = self._int_value(raw, 10, start)
             # After a dot this is a tuple index, which later stages read back from the token text.
