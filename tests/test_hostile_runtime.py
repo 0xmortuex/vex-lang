@@ -594,3 +594,34 @@ def test_running_out_of_memory_while_echoing_is_a_located_error(monkeypatch: pyt
     monkeypatch.setattr("vex.vm.display", out_of_memory)
     text = in_repl("1 + 1")
     assert "runtime error: out of memory" in text and "<repl:1>" in text
+
+
+# ---------------------------------------------------------------- Unit is Ord (docs/types.md)
+@pytest.mark.parametrize(
+    ("expr", "expected"), [("() < ()", "false"), ("() <= ()", "true"), ("() > ()", "false"), ("() >= ()", "true")]
+)
+def test_unit_ordering_is_defined(expr: str, expected: str) -> None:
+    assert run_body(f"print({expr});") == expected + "\n"
+
+
+@pytest.mark.parametrize(
+    ("expr", "expected"), [("lt((), ())", "false"), ("le((), ())", "true"), ("lt(1, 2)", "true"), ('le("b", "a")', "false")]
+)
+def test_unit_ordering_through_a_generic_function(expr: str, expected: str) -> None:
+    prelude = "fn lt[T: Ord](a: T, b: T) -> Bool { a < b }\nfn le[T: Ord](a: T, b: T) -> Bool { a <= b }\n"
+    assert run_source(prelude + f"fn main() {{ print({expr}); }}\n") == expected + "\n"
+
+
+@pytest.mark.parametrize(
+    "body", ["let mut x = [(), ()]; x.sort(); print(x);", "print([(), ()].sorted());"], ids=["sort", "sorted"]
+)
+def test_sorting_units_is_defined(body: str) -> None:
+    assert run_body(body) == "[(), ()]\n"
+
+
+def test_sorting_other_values_is_unchanged() -> None:
+    assert run_body("let mut x = [3, 1, 2]; x.sort(); print(x); print([2, 1].sorted());") == "[1, 2, 3]\n[1, 2]\n"
+
+
+def test_sorted_returns_a_new_list_of_units() -> None:
+    assert run_body("let x = [()]; let mut y = x.sorted(); y.push(()); print(x.len());") == "1\n"

@@ -229,7 +229,8 @@ class VM:
                     pc = arg
                 elif op == LT:
                     b = pop()
-                    stack[-1] = stack[-1] < b
+                    a = stack[-1]
+                    stack[-1] = False if a is None else a < b
                 elif op == MUL_I:
                     b = pop()
                     r = stack[-1] * b
@@ -267,15 +268,18 @@ class VM:
                     push(locals_[arg].v)
                 elif op == POP:
                     pop()
-                elif op == LE:
+                elif op == LE:  # Unit is Ord, with its single value equal to itself, but Python's None is not
                     b = pop()
-                    stack[-1] = stack[-1] <= b
+                    a = stack[-1]
+                    stack[-1] = True if a is None else a <= b
                 elif op == GT:
                     b = pop()
-                    stack[-1] = stack[-1] > b
+                    a = stack[-1]
+                    stack[-1] = False if a is None else a > b
                 elif op == GE:
                     b = pop()
-                    stack[-1] = stack[-1] >= b
+                    a = stack[-1]
+                    stack[-1] = True if a is None else a >= b
                 elif op == NE:
                     b = pop()
                     stack[-1] = stack[-1] != b

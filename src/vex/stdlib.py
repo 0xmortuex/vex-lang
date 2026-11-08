@@ -373,6 +373,17 @@ def _extend(xs: list[Any], ys: list[Any]) -> None:
     xs.extend(ys)
 
 
+def _sort(xs: list[Any]) -> None:
+    if not xs or xs[0] is not None:  # a list of Unit is already sorted; Python cannot compare None
+        xs.sort()
+
+
+def _sorted(xs: list[Any]) -> list[Any]:
+    result = list(xs)
+    _sort(result)
+    return result
+
+
 def _first(xs: list[Any]) -> Any:
     return some(xs[0]) if xs else NONE
 
@@ -395,8 +406,8 @@ method("List", "remove_at", "[T](List[T], Int) -> T", _remove_at, mutates=True)
 method("List", "clear", "[T](List[T])", lambda xs: xs.clear(), mutates=True)
 method("List", "extend", "[T](List[T], List[T])", _extend, mutates=True)
 method("List", "reverse", "[T](List[T])", lambda xs: xs.reverse(), mutates=True)
-method("List", "sort", "[T: Ord](List[T])", lambda xs: xs.sort(), mutates=True)
-method("List", "sorted", "[T: Ord](List[T]) -> List[T]", sorted)
+method("List", "sort", "[T: Ord](List[T])", _sort, mutates=True)
+method("List", "sorted", "[T: Ord](List[T]) -> List[T]", _sorted)
 method("List", "get", "[T](List[T], Int) -> Option[T]", _get)
 method("List", "first", "[T](List[T]) -> Option[T]", _first)
 method("List", "last", "[T](List[T]) -> Option[T]", _last)
