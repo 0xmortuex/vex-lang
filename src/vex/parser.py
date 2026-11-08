@@ -895,6 +895,11 @@ def ast_keywords() -> frozenset[str]:
 
 
 def parse_source(source: Source, sink: DiagSink, repl: bool = False) -> ast.Module:
+    if source.decode_error is not None:
+        offset, byte = source.decode_error
+        sink.error("invalid-utf8", f"invalid UTF-8 byte 0x{byte:02X}", Span(source, offset, offset + 1),
+                   "Vex source files must be UTF-8")  # fmt: skip
+        return ast.Module(source.path, [])
     parser = Parser(source, sink)
     try:
         return parser.parse_module(source.path, repl=repl)

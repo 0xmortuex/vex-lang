@@ -11,9 +11,10 @@ from dataclasses import dataclass, field
 class Source:
     """A source file: path, text and a line-start table for offset -> line:col."""
 
-    def __init__(self, path: str, text: str) -> None:
+    def __init__(self, path: str, text: str, decode_error: tuple[int, int] | None = None) -> None:
         self.path = path
         self.text = text
+        self.decode_error = decode_error  # (text offset, byte value) of the first byte that is not UTF-8
         self._starts = [0]
         for i, ch in enumerate(text):
             if ch == "\n":
