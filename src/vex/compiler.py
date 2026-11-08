@@ -14,6 +14,7 @@ from vex.vtypes import TCon, TNever, TTuple, Type, zonk
 INT_BINOPS = {"+": bc.ADD_I, "-": bc.SUB_I, "*": bc.MUL_I, "/": bc.DIV_I, "%": bc.MOD_I}
 FLOAT_BINOPS = {"+": bc.ADD_F, "-": bc.SUB_F, "*": bc.MUL_F, "/": bc.DIV_F, "%": bc.MOD_F}
 CMP_OPS = {"==": bc.EQ, "!=": bc.NE, "<": bc.LT, "<=": bc.LE, ">": bc.GT, ">=": bc.GE}
+RANGE_UNITS = 4  # a retained range is one object and three integers (start, stop, length)
 FUSED_CMP = {"==": bc.EQ_LK, "!=": bc.NE_LK, "<": bc.LT_LK, "<=": bc.LE_LK, ">": bc.GT_LK, ">=": bc.GE_LK}
 
 
@@ -275,7 +276,7 @@ class FnCompiler:
                 loop.continues.append(self.emit(bc.JMP, None))
         elif isinstance(e, ast.RangeExpr):
             self.cx_each([e.lo, e.hi])
-            self.emit(bc.RANGE_INCL if e.inclusive else bc.RANGE)
+            self.emit(bc.RANGE_INCL if e.inclusive else bc.RANGE, RANGE_UNITS)
         elif isinstance(e, ast.StructLit):
             self.cstruct(e)
         elif isinstance(e, ast.Assign):
@@ -552,6 +553,8 @@ class FnCompiler:
 
     def cfor(self, e: ast.For, want: bool) -> None:
         self.cx(e.iter)
+        if isinstance(e.iter, ast.RangeExpr):  # the loop holds the only reference, so the range is never retained
+            self.code.instrs[-1] = (self.code.instrs[-1][0], 0)
         self.emit(bc.ITER)
         start = self.here()
         self.depth += 1  # the iterator stays below everything the body evaluates

@@ -1,0 +1,148 @@
+== rules: rules/1_standard.vx
+  load status 0 (ok)
+  Mort -> Vex price(3, 1250, "C-100")
+    Vex -> Mort customer_tier("C-100") = gold
+    Vex -> Mort tax_cents(3375) = 270
+  <- 3645 cents
+  Mort -> Vex price(10, 999, "C-200")
+    Vex -> Mort customer_tier("C-200") = silver
+    Vex -> Mort tax_cents(9491) = 759
+  <- 10250 cents
+  Mort -> Vex price(1, 450000, "C-300")
+    Vex -> Mort customer_tier("C-300") = bronze
+    Vex -> Mort tax_cents(450000) = 36000
+  <- 486000 cents
+  Mort -> Vex price(2000000, 1250, "C-100")
+    Vex -> Mort customer_tier("C-100") = gold
+    Vex -> Mort tax_cents(2250000000) = 180000000
+  <- 2430000000 cents
+  Mort -> Vex price(1, 100, "C-404")
+    Vex -> Mort customer_tier("C-404") = no such customer
+  <- status 2 (runtime error), host continues:
+runtime error: Mort: no such customer
+ --> rules/1_standard.vx:4:26
+  |
+4 |     let discount = match host.customer_tier(customer) {
+  |                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+stack trace (most recent call first):
+  in price at rules/1_standard.vx:4:26
+  calls: Mort -> Vex 5, Vex -> Mort 9
+== rules: rules/2_holiday.vx
+  load status 0 (ok)
+  Mort -> Vex price(3, 1250, "C-100")
+    Vex -> Mort customer_tier("C-100") = gold
+    Vex -> Mort tax_cents(2500) = 200
+  <- 2700 cents
+  Mort -> Vex price(10, 999, "C-200")
+    Vex -> Mort customer_tier("C-200") = silver
+    Vex -> Mort tax_cents(6993) = 559
+  <- 7552 cents
+  Mort -> Vex price(1, 450000, "C-300")
+    Vex -> Mort customer_tier("C-300") = bronze
+    Vex -> Mort tax_cents(360000) = 28800
+  <- 388800 cents
+  Mort -> Vex price(2000000, 1250, "C-100")
+    Vex -> Mort customer_tier("C-100") = gold
+    Vex -> Mort tax_cents(1999998250) = 159999860
+  <- 2159998110 cents
+  Mort -> Vex price(1, 100, "C-404")
+    Vex -> Mort customer_tier("C-404") = no such customer
+  <- status 2 (runtime error), host continues:
+runtime error: Mort: no such customer
+ --> rules/2_holiday.vx:6:20
+  |
+6 |     let bonus = if host.customer_tier(customer).upper() == "GOLD" { 500 } else { 0 };
+  |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+stack trace (most recent call first):
+  in price at rules/2_holiday.vx:6:20
+  calls: Mort -> Vex 5, Vex -> Mort 9
+== rules: rules/3_overflow.vx
+  load status 0 (ok)
+  Mort -> Vex price(3, 1250, "C-100")
+    Vex -> Mort customer_tier("C-100") = gold
+    Vex -> Mort tax_cents(3750) = 300
+  <- 7800 cents
+  Mort -> Vex price(10, 999, "C-200")
+    Vex -> Mort customer_tier("C-200") = silver
+    Vex -> Mort tax_cents(9990) = 799
+  <- 20779 cents
+  Mort -> Vex price(1, 450000, "C-300")
+    Vex -> Mort customer_tier("C-300") = bronze
+    Vex -> Mort tax_cents(450000) = 36000
+  <- 936000 cents
+  Mort -> Vex price(2000000, 1250, "C-100")
+  <- status 2 (runtime error), host continues:
+runtime error: integer overflow in `*`
+ --> rules/3_overflow.vx:4:15
+  |
+4 |     let fee = subtotal * subtotal * subtotal;
+  |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+stack trace (most recent call first):
+  in price at rules/3_overflow.vx:4:15
+  Mort -> Vex price(1, 100, "C-404")
+    Vex -> Mort customer_tier("C-404") = no such customer
+  <- status 2 (runtime error), host continues:
+runtime error: Mort: no such customer
+ --> rules/3_overflow.vx:5:5
+  |
+5 |     host.customer_tier(customer);
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+stack trace (most recent call first):
+  in price at rules/3_overflow.vx:5:5
+  calls: Mort -> Vex 5, Vex -> Mort 7
+== rules: rules/4_runaway.vx
+  load status 0 (ok)
+  Mort -> Vex price(3, 1250, "C-100")
+  <- status 4 (budget exhausted), host continues:
+runtime error: execution budget exhausted
+ --> rules/4_runaway.vx:4:5
+  |
+4 |     while true {
+  |     ^^^^^^^^^^^^
+stack trace (most recent call first):
+  in price at rules/4_runaway.vx:4:5
+  Mort -> Vex price(10, 999, "C-200")
+  <- status 4 (budget exhausted), host continues:
+runtime error: execution budget exhausted
+ --> rules/4_runaway.vx:4:5
+  |
+4 |     while true {
+  |     ^^^^^^^^^^^^
+stack trace (most recent call first):
+  in price at rules/4_runaway.vx:4:5
+  Mort -> Vex price(1, 450000, "C-300")
+  <- status 4 (budget exhausted), host continues:
+runtime error: execution budget exhausted
+ --> rules/4_runaway.vx:4:5
+  |
+4 |     while true {
+  |     ^^^^^^^^^^^^
+stack trace (most recent call first):
+  in price at rules/4_runaway.vx:4:5
+  Mort -> Vex price(2000000, 1250, "C-100")
+  <- status 4 (budget exhausted), host continues:
+runtime error: execution budget exhausted
+ --> rules/4_runaway.vx:4:5
+  |
+4 |     while true {
+  |     ^^^^^^^^^^^^
+stack trace (most recent call first):
+  in price at rules/4_runaway.vx:4:5
+  Mort -> Vex price(1, 100, "C-404")
+  <- status 4 (budget exhausted), host continues:
+runtime error: execution budget exhausted
+ --> rules/4_runaway.vx:4:5
+  |
+4 |     while true {
+  |     ^^^^^^^^^^^^
+stack trace (most recent call first):
+  in price at rules/4_runaway.vx:4:5
+  calls: Mort -> Vex 5, Vex -> Mort 0
+== rules: rules/4_forbidden.vx
+  load status 1 (compile error)
+error[capability-denied]: `io.write_file` is not available to this script
+ --> rules/4_forbidden.vx:3:8
+  |
+3 |     io.write_file("stolen.txt", customer);
+  |        ^^^^^^^^^^ not granted
+  = help: the host did not grant the `write` capability (bit 4)

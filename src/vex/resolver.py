@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from vex import syntax as ast
 from vex.diagnostics import DiagSink, Span, suggest
-from vex.stdlib import GLOBALS, NAMESPACES
+from vex.stdlib import FULL_SCOPE, GLOBALS, NAMESPACES
 from vex.symbols import (
     EnumInfo,
     Env,
@@ -12,6 +12,7 @@ from vex.symbols import (
     GlobalVar,
     LocalSym,
     NamespaceSym,
+    Scope,
     StructInfo,
     VariantInfo,
 )
@@ -31,6 +32,7 @@ from vex.vtypes import (
 BUILTIN_TYPE_NAMES = {*PRIMITIVES, "List", "Map", "Option", "Result", "Never", "Self"}
 KNOWN_BOUNDS = ("Eq", "Ord", "Hash")
 HASHABLE = {"Int", "Str", "Bool", "Unit"}
+HOST_NAMESPACE = "host"  # reserved everywhere so that a script means the same thing in every host
 
 
 def make_env() -> Env:
@@ -64,10 +66,11 @@ class FnCtx:
 
 
 class Resolver:
-    def __init__(self, env: Env, sink: DiagSink, repl: bool = False) -> None:
+    def __init__(self, env: Env, sink: DiagSink, repl: bool = False, scope: Scope | None = None) -> None:
         self.env = env
         self.sink = sink
         self.repl = repl
+        self.scope = scope if scope is not None else FULL_SCOPE
         self.ctx: FnCtx | None = None
         self.global_block: ast.Block | None = None
 
@@ -119,7 +122,7 @@ class Resolver:
 
     # ------------------------------------------------------------ declarations
     def check_new_name(self, name: str, span: Span, what: str) -> bool:
-        if name in BUILTIN_TYPE_NAMES or name in GLOBALS or name in NAMESPACES:
+        if name in BUILTIN_TYPE_NAMES or name in GLOBALS or name in NAMESPACES or name == HOST_NAMESPACE:
             self.err("reserved-name", f"`{name}` is a built-in name and cannot be redefined", span,
                      f"this {what} name is reserved")  # fmt: skip
             return False
@@ -527,7 +530,7 @@ class Resolver:
         self.ctx = ctx.parent
 
     def candidates(self) -> list[str]:
-        return [*self.visible_locals(), *self.env.fns, *GLOBALS, *self.env.variants, *NAMESPACES,
+        return [*self.visible_locals(), *self.env.fns, *self.scope.globals, *self.env.variants, *self.scope.namespaces,
                 *self.env.structs, *self.env.globals]  # fmt: skip
 
     def rname(self, e: ast.Name, as_callee: bool) -> None:
@@ -540,8 +543,8 @@ class Resolver:
             e.sym = self.env.globals[n]
         elif n in self.env.fns:
             e.sym = self.env.fns[n]
-        elif n in GLOBALS:
-            e.sym = GLOBALS[n]
+        elif n in self.scope.globals:
+            e.sym = self.scope.globals[n]
         elif n in self.env.variants:
             vs = self.env.variants[n]
             if len(vs) > 1:
@@ -549,10 +552,13 @@ class Resolver:
                 self.err("ambiguous-name", f"variant `{n}` exists in several enums", e.span,
                          help=f"write one of: {names}")  # fmt: skip
             e.sym = vs[0]
-        elif n in NAMESPACES:
+        elif n in self.scope.namespaces:
             e.sym = NamespaceSym(n)
         elif n in self.env.structs or n in self.env.enums:
             e.sym = self.env.adt(n)
+        elif n in self.scope.denied:
+            self.err("capability-denied", f"`{n}` is not available to this script", e.span,
+                     "not granted", help=self.scope.denied[n])  # fmt: skip
         else:
             what = "function" if as_callee else "value"
             s = suggest(n, self.candidates())
@@ -568,11 +574,18 @@ class Resolver:
         obj = e.obj
         if isinstance(obj, ast.Name) and self.lookup_local(obj.name) is None and obj.name not in self.env.globals:
             n = obj.name
-            if n in NAMESPACES:
+            if n in self.scope.namespaces:
                 obj.sym = NamespaceSym(n)
-                member = NAMESPACES[n].get(e.name)
+                members = self.scope.namespaces[n]
+                member = members.get(e.name)
+                qual = f"{n}.{e.name}"
                 if member is None:
-                    s = suggest(e.name, NAMESPACES[n])
+                    obj.sym = None  # already reported below; the checker must not add "not a value"
+                if member is None and qual in self.scope.denied:
+                    self.err("capability-denied", f"`{qual}` is not available to this script",
+                             e.name_span or e.span, "not granted", help=self.scope.denied[qual])  # fmt: skip
+                elif member is None:
+                    s = suggest(e.name, members)
                     self.err("unknown-member", f"module `{n}` has no member `{e.name}`", e.name_span or e.span,
                              "not found", help=f"did you mean `{s}`?" if s else None)  # fmt: skip
                 e.static = member

@@ -31,6 +31,14 @@ class VexPanic(Exception):
         self.trace: list[Any] | None = None
 
 
+class VexBudgetExceeded(VexPanic):
+    """The embedded script used up its execution budget."""
+
+
+class VexHostContractError(VexPanic):
+    """A host function broke its declared signature (wrong type, bad UTF-8, out-of-range Int)."""
+
+
 class VexExit(Exception):
     def __init__(self, code: int) -> None:
         super().__init__(f"exit({code})")
@@ -121,78 +129,224 @@ def quote(s: str) -> str:
     return f'"{out}"'
 
 
-def display(v: Any, top: bool = True) -> str:
-    """Format a value the way ``print`` and string interpolation do."""
-    if top and type(v) is str:
-        return v
-    return _Renderer().show(v)
+# Display work items: (value or literal text, how to treat it). _LEAVE marks the end of an Adt's fields.
+_NESTED = 0
+_TOP = 1
+_TEXT = 2
+_LEAVE = 3
+
+# A work item in ``values_equal`` that ends an Adt pair instead of comparing one.
+_LEAVE_PAIR = object()
+
+# Only an Adt can sit on a cycle: the checker rejects a list, map or tuple that contains itself, so a cycle
+# always passes through a struct or enum field. Both walks below track just the Adts on their current path.
+_CYCLIC_DISPLAY = "cannot print a value that contains itself"
+_CYCLIC_EQUAL = "cannot compare values that contain themselves"
 
 
-class _Renderer:
-    """Formats one value. Shared substructure can make the text exponentially longer than the value is big,
-    so it charges every piece against the string limit as it goes."""
+def _no_charge(units: int) -> None:
+    pass
 
-    def __init__(self) -> None:
-        self.left = MAX_STR_LEN
 
-    def charge(self, n: int) -> None:
-        self.left -= n
-        if self.left < 0:
-            raise VexPanic(f"value is too large to display (over {MAX_STR_LEN} characters)")
+def values_equal(a: Any, b: Any, charge: Callable[[int], None] | None = None) -> bool:
+    """Vex ``==``: the same result as Python's, but without recursion and spending budget as it goes.
 
-    def scalar(self, text: str) -> str:
-        self.charge(len(text))
-        return text
+    Comparing two values that each contain themselves, and that agree all the way to the cycle, is a runtime error.
+    """
+    spend = charge or _no_charge
+    on_path: set[tuple[int, int]] = set()
+    work: list[tuple[Any, Any]] = [(a, b)]
+    while work:
+        x, y = work.pop()
+        if x is _LEAVE_PAIR:
+            on_path.discard(y)
+            continue
+        spend(1)
+        t = type(x)
+        if t is not type(y):
+            if x != y:
+                return False
+        elif t is Adt:
+            if x.tag != y.tag or x.info is not y.info or len(x.f) != len(y.f):
+                return False
+            if x.f:
+                pair = (id(x), id(y))
+                if pair in on_path:
+                    raise VexPanic(_CYCLIC_EQUAL)
+                on_path.add(pair)
+                work.append((_LEAVE_PAIR, pair))
+                work.extend((p, q) for p, q in zip(reversed(x.f), reversed(y.f)) if p is not q)
+        elif t is list or t is tuple:
+            if len(x) != len(y):
+                return False
+            spend(len(x))
+            work.extend((p, q) for p, q in zip(reversed(x), reversed(y)) if p is not q)
+        elif t is dict:
+            if len(x) != len(y):
+                return False
+            spend(len(x))
+            for k, p in x.items():
+                if k not in y:
+                    return False
+                q = y[k]
+                if p is not q:
+                    work.append((p, q))
+        elif t is str:
+            if len(x) != len(y):
+                return False
+            spend(len(x))
+            if x != y:
+                return False
+        elif x != y:
+            return False
+    return True
 
-    def show(self, v: Any) -> str:  # noqa: C901 - one case per runtime representation
-        if v is None:
-            return self.scalar("()")
-        t = type(v)
+
+def charge_size(value: Any, charge: Callable[[int], None]) -> int:
+    """Spend one unit per element or character reachable from ``value``, and return the total."""
+    total = 0
+    work = [value]
+    while work:
+        x = work.pop()
+        t = type(x)
+        size = 1
         if t is str:
-            return self.scalar(quote(v))
-        if t is bool:
-            return self.scalar("true" if v else "false")
-        if t is int:
-            return self.scalar(str(v))
-        if t is float:
-            return self.scalar(fmt_float(v))
-        if t is list:
-            self.charge(2 + _separators(len(v)))
-            return "[" + ", ".join([self.show(x) for x in v]) + "]"
-        if t is tuple:
-            self.charge(2 + _separators(len(v)) + (len(v) == 1))
-            inner = ", ".join([self.show(x) for x in v])
-            return f"({inner},)" if len(v) == 1 else f"({inner})"
-        if t is dict:
-            self.charge(2 + _separators(len(v)) + 2 * len(v))
-            return "{" + ", ".join([f"{self.show(k)}: {self.show(x)}" for k, x in v.items()]) + "}"
-        if t is range:
-            return self.scalar(f"{v.start}..={v.stop - 1}" if v.stop > INT_MAX else f"{v.start}..{v.stop}")
-        if t is Adt:
-            return self.adt(v)
-        return self.scalar(_show_other(v))
-
-    def adt(self, v: Adt) -> str:
-        info = v.info
-        name = info.variants[v.tag]
-        self.charge(len(name) + len(info.name) + 4 + 2 * len(v.f))
-        if info.fields is not None:
-            names = info.fields[v.tag]
-            body = ", ".join([f"{n}: {self.show(x)}" for n, x in zip(names, v.f)])
-            return f"{info.name} {{ {body} }}" if names else info.name
-        if not v.f:
-            return name
-        return f"{name}({', '.join([self.show(x) for x in v.f])})"
+            size += len(x)
+        elif t is list or t is tuple:
+            size += len(x)
+            work.extend(x)
+        elif t is dict:
+            size += len(x)
+            work.extend(x.values())
+        elif t is Adt:
+            size += len(x.f)
+            work.extend(x.f)
+        charge(size)
+        total += size
+    return total
 
 
-def _separators(n: int) -> int:
-    return 2 * max(n - 1, 0)
-
-
-def _show_other(v: Any) -> str:
+def _scalar_text(v: Any) -> str:
+    if v is None:
+        return "()"
     t = type(v)
-    if t is Closure:
-        return f"<fn {v.code.name}>"
-    if t is BuiltinFn:
-        return f"<builtin {v.name}>"
+    if t is bool:
+        return "true" if v else "false"
+    if t is float:
+        return fmt_float(v)
     return str(v)
+
+
+def display(v: Any, top: bool = True, charge: Callable[[int], None] | None = None) -> str:
+    """Format a value the way ``print`` and string interpolation do.
+
+    Without recursion, so nesting cannot exhaust the Python stack, and spending budget as text is produced.
+    Printing a value that contains itself is a runtime error. Shared substructure can make the text exponentially
+    longer than the value is big, so the text itself is limited to MAX_STR_LEN characters.
+    """
+    if v is None or type(v) in (bool, int, float):
+        return _scalar_text(v)
+    spend = charge or _no_charge
+    if type(v) is str and top:
+        spend(len(v))
+        return v
+    out: list[str] = []
+    on_path: set[int] = set()
+    work: list[tuple[Any, int]] = [(v, _TOP if top else _NESTED)]
+    room = MAX_STR_LEN
+    while work:
+        x, mode = work.pop()
+        if mode == _LEAVE:
+            on_path.discard(x)
+            continue
+        if mode == _TEXT:
+            text = x
+        else:
+            spend(1)
+            t = type(x)
+            if x is None or t in (bool, int, float):
+                text = _scalar_text(x)
+            elif t is str:
+                spend(len(x))
+                text = x if mode == _TOP else quote(x)
+            elif t is list or t is tuple or t is dict:
+                spend((6 if t is dict else 3) * len(x))  # each element pushes two or more work items below
+                _push_container(work, x, t)
+                continue
+            elif t is Adt:
+                spend(len(x.f))
+                if x.f:
+                    key = id(x)
+                    if key in on_path:
+                        raise VexPanic(_CYCLIC_DISPLAY)
+                    on_path.add(key)
+                    work.append((key, _LEAVE))
+                _push_adt(work, x)
+                continue
+            elif t is range:
+                text = f"{x.start}..={x.stop - 1}" if x.stop > INT_MAX else f"{x.start}..{x.stop}"
+            elif t is Closure:
+                text = f"<fn {x.code.name}>"
+            elif t is BuiltinFn:
+                text = f"<builtin {x.name}>"
+            else:
+                text = str(x)
+        room -= len(text)
+        if room < 0:
+            raise VexPanic(f"value is too large to display (over {MAX_STR_LEN} characters)")
+        out.append(text)
+    return "".join(out)
+
+
+def _push_separated(work: list[tuple[Any, int]], items: list[list[tuple[Any, int]]]) -> None:
+    """Push ``items`` (each already in display order) so they pop in order, with ", " between them."""
+    for i in range(len(items) - 1, -1, -1):
+        work.extend(reversed(items[i]))
+        if i:
+            work.append((", ", _TEXT))
+
+
+_SEPARATOR = (", ", _TEXT)
+_COLON = (": ", _TEXT)
+
+
+def _push_container(work: list[tuple[Any, int]], x: Any, t: type) -> None:
+    """Push the elements directly: a temporary list per element would use far more memory than was charged."""
+    if t is dict:
+        work.append(("}", _TEXT))
+        first = True
+        for k, v in reversed(x.items()):
+            if not first:
+                work.append(_SEPARATOR)
+            first = False
+            work.append((v, _NESTED))
+            work.append(_COLON)
+            work.append((k, _NESTED))
+        work.append(("{", _TEXT))
+        return
+    closing = "]" if t is list else (",)" if len(x) == 1 else ")")
+    work.append((closing, _TEXT))
+    for i in range(len(x) - 1, -1, -1):
+        work.append((x[i], _NESTED))
+        if i:
+            work.append(_SEPARATOR)
+    work.append(("[" if t is list else "(", _TEXT))
+
+
+def _push_adt(work: list[tuple[Any, int]], v: Adt) -> None:
+    info: AdtInfo = v.info
+    name: str = info.variants[v.tag]
+    if info.fields is not None:
+        names = info.fields[v.tag]
+        if not names:
+            work.append((info.name, _TEXT))
+            return
+        work.append((" }", _TEXT))
+        _push_separated(work, [[(f"{n}: ", _TEXT), (x, _NESTED)] for n, x in zip(names, v.f)])
+        work.append((f"{info.name} {{ ", _TEXT))
+    elif not v.f:
+        work.append((name, _TEXT))
+    else:
+        work.append((")", _TEXT))
+        _push_separated(work, [[(x, _NESTED)] for x in v.f])
+        work.append((f"{name}(", _TEXT))

@@ -10,7 +10,7 @@ import sys
 import threading
 import time
 import weakref
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from typing import Any
 
 import pytest
@@ -456,19 +456,46 @@ DEEP = "struct N { kids: List[N] }\nfn deep(n: Int) -> N { let mut c = N { kids:
 
 
 @pytest.mark.parametrize(
-    "body",
+    ("body", "fragment"),
     [
-        "print(deep(5000));",
-        "print(deep(5000) == deep(5000));",
-        'print("{deep(5000)}");',
-        "assert_eq(deep(5000), deep(5001));",
-        "let mut n = N { kids: [] }; n.kids.push(n); print(n);",
-        "let mut a = N { kids: [] }; let mut b = N { kids: [] }; a.kids.push(b); b.kids.push(a); print(a == b);",
+        ("assert_eq(deep(5000), deep(5001));", "assertion failed"),
+        ("let mut n = N { kids: [] }; n.kids.push(n); print(n);", "contains itself"),
+        ('let mut n = N { kids: [] }; n.kids.push(n); print("{n}");', "contains itself"),
+        ("let mut a = N { kids: [] }; let mut b = N { kids: [] }; a.kids.push(b); b.kids.push(a); print(a == b);", "contain themselves"),
     ],
-    ids=["print", "equal", "interpolate", "assert_eq", "print-cycle", "equal-cycle"],
+    ids=["assert_eq", "print-cycle", "interpolate-cycle", "equal-cycle"],
 )
-def test_too_deep_value_is_a_located_error(body: str) -> None:
-    panics(body, "recursion too deep", DEEP)
+def test_values_that_cannot_be_handled_are_located_errors(body: str, fragment: str) -> None:
+    panics(body, fragment, DEEP)
+
+
+def test_deep_values_print_and_compare_without_using_the_python_stack() -> None:
+    assert run_source(DEEP + "fn main() {\nprint(deep(5000));\n}\n").count("N { kids:") == 5001
+    assert run_source(DEEP + "fn main() {\nprint(deep(5000) == deep(5000));\n}\n") == "true\n"
+    assert run_source(DEEP + 'fn main() {\nprint("{deep(5000)}".len());\n}\n') == f"{len(_deep_text(5000))}\n"
+
+
+def _deep_text(depth: int) -> str:
+    return "N { kids: [" * depth + "N { kids: [] }" + "] }" * depth
+
+
+def fail_with(error: type[BaseException]) -> Callable[..., object]:
+    def go(*args: object, **kwargs: object) -> object:
+        raise error
+
+    return go
+
+
+def test_python_recursion_in_a_builtin_is_a_located_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(stdlib.METHODS["Str"]["upper"], "impl", fail_with(RecursionError))
+    panics('print("a".upper());', "recursion too deep")
+
+
+def test_python_recursion_while_echoing_is_a_located_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("vex.vm.display", fail_with(RecursionError))
+    out = io.StringIO()
+    repl.Session(out).handle("1 + 1")
+    assert "runtime error: recursion too deep" in out.getvalue() and "<repl:1>" in out.getvalue()
 
 
 @pytest.mark.parametrize(
@@ -583,11 +610,11 @@ def test_earlier_statements_of_a_failed_input_keep_their_values() -> None:
     assert "1 : Int" in text and "`b` has no value" in text
 
 
-def test_echoing_a_value_too_deep_to_display_is_a_located_error() -> None:
+def test_echoing_a_deep_value_works_and_keeps_the_session() -> None:
     prelude = "struct N { kids: List[N] }"
     build = "let mut c = N { kids: [] };\nfor i in 0..5000 { c = N { kids: [c] }; }\nc"
     text = in_repl(prelude, build, "1 + 1")
-    assert "runtime error: recursion too deep" in text and "<repl:2>" in text
+    assert text.count("N { kids:") == 5001
     assert text.rstrip().endswith("2 : Int")
 
 
