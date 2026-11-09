@@ -1,0 +1,254 @@
+// Sources the parser accepts, written independently of docs/spec.md. One per line; `repl: ` marks REPL input.
+// tests/test_spec_conformance.py requires the spec's grammar to accept each one, and every narrowing of the grammar to reject one.
+/* an empty module */
+repl: /* an empty entry */
+repl: let x = 1;
+repl: fn f() {}
+repl: {}
+repl: {};
+repl: {} 1
+repl: x = 1
+repl: 1 + 2
+repl: return
+repl: let x = 1; x
+fn f() {}
+fn f(a: Int) {}
+fn f(a: Int,) {}
+fn f(a: Int, b: Int, c: Int) {}
+fn f(mut a: Int) {}
+fn f(self) {}
+fn f(self,) {}
+fn f(mut self, a: Int) {}
+fn f(a: Int, self: Int) {}
+fn f() -> Int {}
+fn f[]() {}
+fn f[T]() {}
+fn f[T,]() {}
+fn f[T, U]() {}
+fn f[T, U, V]() {}
+fn f[t: eq]() {}
+fn f[t: eq + ord]() {}
+fn f[t: eq + ord + hash]() {}
+fn f[T: Eq, U: Ord + Hash,]() {}
+import a;
+struct S {}
+struct s { a: Int }
+struct S { a: Int, }
+struct S { a: Int, b: Int }
+struct S { a: Int, b: Int, c: Int, }
+struct S[T] { a: T }
+enum E {}
+enum e { a }
+enum E { A, }
+enum E { A, B }
+enum E { A, B, C, }
+enum E { A() }
+enum E { A(Int) }
+enum E { A(Int,) }
+enum E { a(Int, Str) }
+enum E[T] { A(T) }
+impl S {}
+impl S { fn a() {} }
+impl S { fn a() {} fn b() {} }
+impl[T] S[T] {}
+impl (A) {}
+fn f(a: ()) {}
+fn f(a: (Int)) {}
+fn f(a: (Int,)) {}
+fn f(a: (Int, Str)) {}
+fn f(a: (Int, Str, Bool,)) {}
+fn f(a: fn()) {}
+fn f(a: fn(Int)) {}
+fn f(a: fn(Int, Str,) -> Int) {}
+fn f(a: fn() -> fn() -> ()) {}
+fn f(a: foo) {}
+fn f(a: foo[]) {}
+fn f(a: List[Int]) {}
+fn f(a: Map[Int, Str,]) {}
+fn m() { ; }
+fn m() { ;; 1 }
+fn m() { let a = 1; }
+fn m() { let a: Int = 1; let b = 2; }
+fn m() { {} }
+fn m() { {}; 1 }
+fn m() { {} 1 }
+fn m() { if a {} - 1; }
+fn m() { {}? ; }
+fn m() { {}.a; }
+fn m() { {}.a.b.c; }
+fn m() { {}.a(); }
+fn m() { {}.a + b; }
+fn m() { {}.a + b * c; }
+fn m() { {}? + 1; }
+fn m() { {}.a = 1; }
+fn m() { {}.a.b = 1; }
+fn m() { {}.a.b.c = 1; }
+fn m() { {}.a[0] += 1; }
+fn m() { {}.f().a = 1; }
+fn m() { {}.a }
+fn m() { {}?.a = 1 }
+fn m() { 1 }
+fn m() { 1; }
+fn m() { a = 1; }
+fn m() { a = 1 }
+fn m() { a += 1; a -= 1; a *= 1; a /= 1; a %= 1; a = 1; }
+fn m() { a.b = 1; }
+fn m() { a.b.c = 1; }
+fn m() { a[0] = 1; }
+fn m() { a.0 = 1; }
+fn m() { a[0][1] = 2; }
+fn m() { f().a = 1; }
+fn m() { f().g().a.b = 1; }
+fn m() { [1][0] = 2; }
+fn m() { (a).b = 1; }
+fn m() { (x) = 1; }
+fn m() { ((x)) = 1; }
+fn m() { (x.y) += 1; }
+fn m() { ((x[0])) = 1; }
+fn m() { if a {} }
+fn m() { if a {} else {} }
+fn m() { if a {} else if b {} }
+fn m() { if a {} else if b {} else {} }
+fn m() { match a {} }
+fn m() { match a { _ => 1 } }
+fn m() { match a { _ => 1, } }
+fn m() { match a { b => 1, c => 2 } }
+fn m() { match a { b => 1, c => 2, d => 3, } }
+fn m() { match a { _ if b => 1, _ => 2 } }
+fn m() { match a { _ => { 1 } } }
+fn m() { match a { _ => { 1 }, _ => 2 } }
+fn m() { match a { _ => { 1 } _ => 2 } }
+fn m() { match a { _ => { 1 } + 2 _ => 3 } }
+fn m() { while a {} }
+fn m() { for a in b {} }
+fn m() { for (a, b) in c {} }
+fn m() { a..b; }
+fn m() { a..=b; }
+fn m() { a || b; a && b; a == b; a != b; a < b; a <= b; a > b; a >= b; a + b; a - b; a * b; a / b; a % b; }
+fn m() { a + b + c + d; }
+fn m() { -a; !a; - - a; !-!a; }
+fn m() { a(); a(1); a(1,); a(1, 2); a(1, 2, 3,); }
+fn m() { a[0]; a.b; a.0; a?; a.b.0(1)[2]?; }
+fn m() { 1; 1.5; "s"; "{a}"; true; false; a; }
+fn m() { (); (1); (1,); (1, 2); (1, 2, 3,); }
+fn m() { []; [1]; [1,]; [1, 2]; [1, 2, 3,]; }
+fn m() { #{}; #{1: 2}; #{1: 2,}; #{1: 2, 3: 4}; #{1: 2, 3: 4, 5: 6,}; }
+fn m() { S {}; S { a }; S { a, }; S { a: 1 }; S { a: 1, }; S { a: 1, b }; S { a, b: 2, c: 3, }; }
+fn m() { || 1; | | 1; |a| a; |a,| a; |a: Int| a; |a, b| a; |a: Int, b, c,| a; }
+fn m() { || -> Int { 1 }; |a| -> Int { a }; |a,| -> Int { a }; }
+fn m() { break; continue; while a { break } }
+fn m() { return; }
+fn m() { return }
+fn m() { return 1; }
+fn m() { (return); }
+fn m() { f(return, 1); }
+fn m() { [(return), 1]; f(return); }
+fn m() { #{1: (return)}; }
+fn m() { match a { _ => return, _ => 1 } }
+fn m() { if a..b {} }
+fn m() { if a..=b {} }
+fn m() { if a + b * c {} }
+fn m() { if -a {} }
+fn m() { if !a {} }
+fn m() { while - ! a {} }
+fn m() { if a.b(1)[2]? {} }
+fn m() { if return a {} }
+fn m() { if return {} {} }
+fn m() { if (S { a }).a {} }
+fn m() { if [S {}].len() == f(S {}) {} }
+fn m() { if |a| S { a } {} }
+fn m() { if { S {} } {} }
+fn m() { match S { _ => 1 } }
+fn m() { for a in b.c {} }
+fn m() { for a in S {} }
+fn m() { for A | B in c {} }
+fn m() { match a { b | c => 1 } }
+fn m() { match a { b | c | d => 1 } }
+fn m() { match a { _ => 1 } }
+fn m() { match a { () => 1 } }
+fn m() { match a { (b) => 1 } }
+fn m() { match a { (b,) => 1 } }
+fn m() { match a { (b, c) => 1 } }
+fn m() { match a { (b, c, d,) => 1 } }
+fn m() { match a { b => 1 } }
+fn m() { match a { A() => 1 } }
+fn m() { match a { A(b) => 1 } }
+fn m() { match a { A(b,) => 1 } }
+fn m() { match a { A(b, c) => 1 } }
+fn m() { match a { A(b, c, d,) => 1 } }
+fn m() { match a { A.b() => 1 } }
+fn m() { match a { A.b(c) => 1 } }
+fn m() { match a { A.b.c(d) => 1 } }
+fn m() { match a { A.b.c.d(e) => 1 } }
+fn m() { match a { a.b() => 1 } }
+fn m() { match a { a.b(c) => 1 } }
+fn m() { match a { a.b.c(d) => 1 } }
+fn m() { match a { a.b.c.d(e) => 1 } }
+fn m() { match a { A.B(c) => 1 } }
+fn m() { match a { a.b => 1 } }
+fn m() { match a { A.B => 1 } }
+fn m() { match a { a.b.c => 1 } }
+fn m() { match a { a.b.c.d => 1 } }
+fn m() { match a { S {} => 1 } }
+fn m() { match a { S { .. } => 1 } }
+fn m() { match a { S { b } => 1 } }
+fn m() { match a { S { B } => 1 } }
+fn m() { match a { S { b, } => 1 } }
+fn m() { match a { S { b, .. } => 1 } }
+fn m() { match a { S { b, c } => 1 } }
+fn m() { match a { S { b, c, d } => 1 } }
+fn m() { match a { S { b, c, d, .. } => 1 } }
+fn m() { match a { S { b: c } => 1 } }
+fn m() { match a { S { b: (c, d), e: F(g) } => 1 } }
+fn m() { match a { 1 => 1 } }
+fn m() { match a { 1.5 => 1 } }
+fn m() { match a { -1 => 1 } }
+fn m() { match a { -1.5 => 1 } }
+fn m() { match a { true => 1 } }
+fn m() { match a { false => 1 } }
+fn m() { match a { "s" => 1 } }
+fn m() { let a = 1; }
+fn m() { let mut a = 1; }
+fn m() { let _ = 1; }
+fn m() { let a | b = 1; }
+fn m() { let a | b | c = 1; }
+fn m() { let () = 1; }
+fn m() { let (a) = 1; }
+fn m() { let (a,) = 1; }
+fn m() { let (a, b) = 1; }
+fn m() { let (a, b, c,) = 1; }
+fn m() { let (mut a, b) = 1; }
+fn m() { let A() = 1; }
+fn m() { let A(b) = 1; }
+fn m() { let A(b,) = 1; }
+fn m() { let A(b, c) = 1; }
+fn m() { let A(mut b) = 1; }
+fn m() { let A.b() = 1; }
+fn m() { let A.b(c) = 1; }
+fn m() { let A.b.c(d) = 1; }
+fn m() { let A.b.c.d(e) = 1; }
+fn m() { let a.b() = 1; }
+fn m() { let a.b(c) = 1; }
+fn m() { let a.b.c(d) = 1; }
+fn m() { let a.b.c.d(e) = 1; }
+fn m() { let a.b = 1; }
+fn m() { let a.b.c = 1; }
+fn m() { let S {} = 1; }
+fn m() { let S { .. } = 1; }
+fn m() { let S { a } = 1; }
+fn m() { let S { A } = 1; }
+fn m() { let S { a, } = 1; }
+fn m() { let S { a, .. } = 1; }
+fn m() { let S { a, b } = 1; }
+fn m() { let S { a, b, c } = 1; }
+fn m() { let S { a, b, c, .. } = 1; }
+fn m() { let S { a: b } = 1; }
+fn m() { let S { a: mut b, c: (d, e) } = 1; }
+fn m() { let 1 = 1; }
+fn m() { let 1.5 = 1; }
+fn m() { let -1 = 1; }
+fn m() { let -1.5 = 1; }
+fn m() { let true = 1; }
+fn m() { let false = 1; }
+fn m() { let "s" = 1; }
+fn m() { "{1 + 2}{(a)}{[1]}"; }

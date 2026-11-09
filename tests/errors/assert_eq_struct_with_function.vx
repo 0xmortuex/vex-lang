@@ -1,0 +1,6 @@
+// expect: unsatisfied-bound 5:5
+struct S { f: fn() -> Int }
+fn g() -> Int { 1 }
+fn main() {
+    assert_eq(S { f: g }, S { f: g });
+}

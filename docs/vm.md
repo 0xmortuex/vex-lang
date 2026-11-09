@@ -1,5 +1,7 @@
 # The bytecode and the VM
 
+This describes the current implementation and is not normative. The language is defined by [spec.md](spec.md).
+
 ```text
 source ─► lexer ─► parser ─► resolver ─► checker ─► compiler ─► bytecode ─► VM
          tokens    AST+spans  symbols    types +      Code objects          stack machine
@@ -73,16 +75,10 @@ A short example, `fn add(a: Int, b: Int) -> Int { a + b }`:
   0003       RET
 ```
 
-## Integer semantics (the contract)
+## Integer semantics
 
-* `Int` is 64-bit two's complement range, `-2^63 … 2^63 - 1`.
-* `+ - *`, unary `-` and the library functions `abs`, `pow`, `sum`, `gcd`, `Range.len` are **checked**: a result outside the
-  range raises the runtime error ``integer overflow in `op` ``. There is no wraparound mode.
-* `/` truncates toward zero; `%` has the sign of the left operand; `x / 0` and `x % 0` raise
-  `division by zero`; `MIN / -1` raises ``integer overflow in `/` ``.
-* Integer literals outside the range are compile errors.
-* Python's arbitrary-precision integers are used internally, but every instruction that can
-  produce an out-of-range value checks it before the value can escape into the program.
+Specified in [spec.md](spec.md#7-integers-and-floats). Python's arbitrary-precision integers are used internally, and every
+instruction that can produce an out-of-range value checks it before the value can escape into the program.
 
 ## Runtime errors
 
@@ -94,12 +90,7 @@ the failing source line with a caret and "in <function> at file:line:col" for ea
 
 ## Allocation limits
 
-A `Str` built by one operation is limited to 50,000,000 characters and a `List` built by one operation to
-10,000,000 elements. Every builtin that returns a `Str` or a `List`, along with `+`, interpolation, `extend`,
-list and map literals and the text of `print` / `eprint`, stops the program with a runtime error instead of
-exceeding them, and `io.read_file` returns `Err`. Within a program, a `List` or `Map` can pass the cap only by
-growing one `push` or `insert` at a time, and builtins that would build a new list from it refuse. Running out
-of memory while growing one is a runtime error like any other.
+Specified in [spec.md](spec.md#10-limits).
 
 ## Performance notes
 

@@ -1,0 +1,7 @@
+// expect: bad-operand 6:13
+struct Inner { f: fn() -> Int }
+enum E { A(Inner), B }
+fn g() -> Int { 1 }
+fn main() {
+    let x = E.A(Inner { f: g }) == E.B;
+}

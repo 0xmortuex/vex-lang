@@ -151,7 +151,7 @@ stack trace (most recent call first):
 - **Methods** via `impl` blocks (`self`, `mut self`, associated functions, `Self`).
 - **Strings** with interpolation (`"x = {x + 1}"`), full Unicode (Turkish text, emoji), escapes.
 - **Checked integers.** `Int` is 64-bit; overflow, division by zero and out-of-range indexes are
-  runtime errors, never silent wraparound. See [docs/types.md](docs/types.md#integers-and-floats).
+  runtime errors, never silent wraparound. See [the spec](docs/spec.md#7-integers-and-floats).
 - **Modules** with `import name;` (flat), and a small standard library: `math`, `io.read_file`, `env.args`,
   string / list / map / option / result methods.
 - **A real pipeline**: lexer, parser with error recovery, name resolution, type checker, bytecode
@@ -160,9 +160,8 @@ stack trace (most recent call first):
 ## Documentation
 
 - [Language tour](docs/tour.md): everything, and a test runs every snippet
+- [Language specification](docs/spec.md): grammar, type rules, evaluation order, error semantics and limits, checked by the test suite
 - [Embedding and ABI](docs/ffi.md): host functions, capabilities, the budget, the native ABI
-- [Grammar](docs/grammar.md): EBNF and operator precedence
-- [Type rules](docs/types.md): inference, bounds, mutability, exhaustiveness, integer semantics
 - [Bytecode and VM](docs/vm.md): instruction set, frames, closures, runtime errors
 - [`examples/`](examples/): rules engine, config validator, text templating, CSV report, state machine,
   JSON-ish parser, bank account, generic stack, linked list via enums, BFS maze solver, minimax tic-tac-toe,
