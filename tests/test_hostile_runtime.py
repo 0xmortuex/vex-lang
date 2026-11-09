@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import functools
 import io
+import itertools
 import os
 import random
 import subprocess
@@ -736,6 +738,22 @@ def test_run_function_leaves_a_reused_argument_list_alone() -> None:
     assert args == [2]
     assert vm.run_function(code, args) == 4
     assert args == [2]
+
+
+def test_run_function_leaves_alone_a_list_owned_only_by_a_tuple_or_partial() -> None:
+    code = add_two_code()
+    vm = VM(io.StringIO())
+    run = vm.run_function
+    packed = (code, [2])
+    assert run(*packed) == 4
+    assert packed[1] == [2]
+    bound = functools.partial(run, code, [2])
+    assert bound() == 4
+    assert bound.args[1] == [2]
+    assert bound() == 4
+    calls = [(code, [2])]
+    assert list(itertools.starmap(run, calls)) == [4]
+    assert calls[0][1] == [2]
 
 
 def test_run_function_accepts_a_tuple_of_arguments() -> None:

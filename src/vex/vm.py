@@ -109,8 +109,6 @@ _DONE = object()
 _TOO_DEEP = "recursion too deep (a deeply nested value, or calls nested through builtins such as `map`)"
 _OUT_OF_MEMORY = "out of memory"
 _RESERVE_BYTES = 1024 * 1024  # room for reporting out of memory when values that cannot be released fill the heap
-_ARGS_PINNED_BY_CALLER = sys.version_info < (3, 11)
-
 
 class VM:
     callback_depth = 0  # process-wide: nesting crosses instances when hosts re-enter each other
@@ -186,14 +184,8 @@ class VM:
 
         `args` may be any sequence and the caller can reuse it: it is never changed.
         """
-        # Python 3.10 keeps a call's arguments on the caller's evaluation stack until it returns, so when memory runs
-        # out only emptying the list itself can release a temporary's values. That cannot be seen from outside only
-        # if nothing else refers to the list: three references are that stack, `args` and getrefcount's own argument.
-        if _ARGS_PINNED_BY_CALLER and type(args) is list and sys.getrefcount(args) == 3:
-            locals_ = args
-        else:
-            locals_ = [] if args is None else list(args)
-        del args  # on later Pythons a temporary's list dies here, leaving `locals_` as the only reference to its values
+        locals_ = [] if args is None else list(args)
+        del args  # on Python 3.11+ a temporary's list dies here, leaving `locals_` as the only reference to its values
         locals_.extend([None] * (code.nlocals - len(locals_)))
         self._oom_code = None
         if self.reserve is None:
