@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import functools
 import io
+import itertools
 import os
 import random
 import subprocess
@@ -688,9 +690,188 @@ def test_program_values_are_released_before_the_error_is_built(monkeypatch: pyte
 
     monkeypatch.setattr(vm_module, "VexRuntimeError", spy)
     with pytest.raises(real_error) as info:
-        vm.run_function(code, held_arguments())
+        vm.run_owned(code, held_arguments())
     assert released == [True]
     assert [name for name, _ in info.value.trace] == ["inner", "outer"]
+
+
+def memory_failure(refs: list[weakref.ref[Held]], chained: bool) -> Callable[..., Any]:
+    """A compile stage that runs out of memory with a watched value in its frame.
+
+    `chained`: unwinding with a full heap cannot allocate traceback entries, and CPython reports that by raising
+    another MemoryError whose __context__ is the first, so the frames are pinned from inside the chain.
+    """
+
+    def fail(*args: object, **kwargs: object) -> Any:
+        held = Held()
+        refs.append(weakref.ref(held))
+        try:
+            raise MemoryError
+        except MemoryError:
+            if chained:
+                raise MemoryError  # noqa: B904 - the implicit __context__ is what this test is about
+            raise
+
+    return fail
+
+
+@pytest.mark.parametrize("chained", [False, True], ids=["single", "chained"])
+def test_compile_values_are_released_before_the_error_is_built(monkeypatch: pytest.MonkeyPatch, chained: bool) -> None:
+    refs: list[weakref.ref[Held]] = []
+    released: list[bool] = []
+    real_error = out_of_memory_error
+
+    def spy(source: Source) -> VexError:
+        released.append(refs[0]() is None)
+        return real_error(source)
+
+    monkeypatch.setattr(api, "_compile", memory_failure(refs, chained))
+    monkeypatch.setattr(api, "out_of_memory_error", spy)
+    with pytest.raises(VexError) as info:
+        api.compile_source(Source("<t>", "fn main() {}\n"))
+    assert released == [True]
+    assert info.value.diagnostics[0].code == "out-of-memory"
+
+
+@pytest.mark.parametrize("chained", [False, True], ids=["single", "chained"])
+def test_repl_values_are_released_before_it_rolls_back(monkeypatch: pytest.MonkeyPatch, chained: bool) -> None:
+    refs: list[weakref.ref[Held]] = []
+    released: list[bool] = []
+    session = repl.Session(io.StringIO())
+    real_rollback = session.journal.rollback
+
+    def spy() -> None:
+        released.append(refs[0]() is None)
+        real_rollback()
+
+    monkeypatch.setattr(session.journal, "rollback", spy)
+    monkeypatch.setattr(repl, "parse_source", memory_failure(refs, chained))
+    with pytest.raises(VexError) as info:
+        session.eval("1")
+    assert released == [True]
+    assert info.value.diagnostics[0].code == "out-of-memory"
+
+
+def test_a_file_too_large_to_decode_is_reported_as_unreadable(monkeypatch: pytest.MonkeyPatch) -> None:
+    class Undecodable(bytes):
+        def decode(self, encoding: str = "utf-8", errors: str = "strict") -> str:
+            raise MemoryError
+
+    class File:
+        def __enter__(self) -> File:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            pass
+
+        def read(self) -> bytes:
+            return Undecodable(b"x")
+
+    monkeypatch.setattr(api, "open", lambda *args: File(), raising=False)
+    with pytest.raises(OSError, match="too large"):
+        api.read_source("big.vx")
+
+
+def test_the_cli_reports_memory_running_out_outside_the_compiler(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Any
+) -> None:
+    monkeypatch.setattr(cli, "compile_file", out_of_memory)
+    path = tmp_path / "a.vx"
+    path.write_text("fn main() {}\n", encoding="utf-8")
+    assert cli.main(["run", str(path)]) == cli.EXIT_RUNTIME
+    err = capsys.readouterr().err
+    assert "out of memory" in err
+    assert "internal compiler error" not in err
+
+
+def add_two_code() -> Any:
+    prog = compile_text("fn add_two(mut x: Int) -> Int { x += 2; let y = x; y }\nfn main() {}\n", "<t>")
+    return prog.env.fns["add_two"].code
+
+
+def test_run_function_leaves_a_reused_argument_list_alone() -> None:
+    code = add_two_code()
+    vm = VM(io.StringIO())
+    args = [2]
+    assert vm.run_function(code, args) == 4
+    assert args == [2]
+    assert vm.run_function(code, args) == 4
+    assert args == [2]
+
+
+def test_run_function_leaves_alone_a_list_owned_only_by_a_tuple_or_partial() -> None:
+    code = add_two_code()
+    vm = VM(io.StringIO())
+    run = vm.run_function
+    packed = (code, [2])
+    assert run(*packed) == 4
+    assert packed[1] == [2]
+    bound = functools.partial(run, code, [2])
+    assert bound() == 4
+    assert bound.args[1] == [2]
+    assert bound() == 4
+    calls = [(code, [2])]
+    assert list(itertools.starmap(run, calls)) == [4]
+    assert calls[0][1] == [2]
+
+
+def test_public_run_function_never_mutates_or_rejects_its_arguments() -> None:
+    code = add_two_code()
+    vm = VM(io.StringIO())
+    run = vm.run_function
+    reused = [2]
+    packed = (code, [2])
+    tuple_packed = (code, (2,))
+    bound = functools.partial(run, code, [2])
+    bound_tuple = functools.partial(run, code, (2,))
+    calls = [(code, [2]), (code, (2,))]
+
+    results = [
+        run(code, reused),
+        run(code, reused),
+        run(code, (2,)),
+        run(*packed),
+        run(*tuple_packed),
+        bound(),
+        bound(),
+        bound_tuple(),
+        *itertools.starmap(run, calls),
+    ]
+
+    assert results == [4] * 10
+    assert reused == [2]
+    assert packed[1] == [2]
+    assert bound.args[1] == [2]
+    assert calls[0][1] == [2]
+
+
+def test_run_function_accepts_a_tuple_of_arguments() -> None:
+    code = add_two_code()
+    vm = VM(io.StringIO())
+    args = (2,)
+    assert vm.run_function(code, args) == 4
+    assert vm.run_function(code, args) == 4
+    assert args == (2,)
+
+
+def test_running_out_of_memory_does_not_empty_a_list_the_caller_can_still_see(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(stdlib.METHODS["Str"]["upper"], "impl", out_of_memory)
+    prog = compile_text('fn f(x: Int) { "a".upper(); }\nfn main() {}\n', "<t>")
+    code = prog.env.fns["f"].code
+    assert code is not None
+    vm = VM(io.StringIO())
+    named = [1]
+    in_a_container = {"args": [2]}
+
+    def passed_along(args: list[Any]) -> None:
+        vm.run_function(code, args)
+
+    for call in (lambda: vm.run_function(code, named), lambda: vm.run_function(code, in_a_container["args"]),
+                 lambda: passed_along(named)):  # fmt: skip
+        with pytest.raises(VexRuntimeError):
+            call()
+    assert named == [1]
+    assert in_a_container == {"args": [2]}
 
 
 def test_out_of_memory_is_reported_even_if_the_trace_cannot_be_built(monkeypatch: pytest.MonkeyPatch) -> None:

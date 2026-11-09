@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 jobs:
   test:
@@ -42,3 +43,49 @@ jobs:
         run: for f in examples/*.vx; do python -m vex run "$f" > /dev/null || exit 1; done
       - name: Benchmarks still run
         run: python benchmarks/run.py
+
+  embed-demo:
+    name: Embed demo (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            zig-python: Scripts/python.exe
+          - os: ubuntu-latest
+            zig-python: bin/python
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    env:
+      MORT_ROOT: ${{ github.workspace }}/.mort
+      # mortc would otherwise take any cc on PATH; this job proves the zig build. An absolute path, because on
+      # Windows a bare `python` started from a venv resolves to the base interpreter, which has no ziglang.
+      MORT_CC: ${{ github.workspace }}/.zig/${{ matrix.zig-python }} -m ziglang cc
+      PYTHONUTF8: "1"
+      UV_PYTHON: "3.13"
+      UV_PYTHON_PREFERENCE: only-system  # setup-python's build has the CPython library the host links
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check out the pinned Mort compiler
+        uses: actions/checkout@v4
+        with:
+          repository: 0xmortuex/Mort
+          ref: 69c7052bf6aa2b35b7eaac4eaca46e59eb8e9ae8
+          path: .mort
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.11.7"
+      - run: uv sync --locked
+      - name: Install the ziglang C backend
+        run: |
+          uv venv .zig
+          uv pip install --python .zig "ziglang==0.17.1"
+      - name: Build the demo, run it, compare with expected.out
+        run: uv run --locked python examples/embed/run.py --check
+      - name: Run the demo tests
+        run: uv run --locked pytest tests/test_embed_demo.py -v --junitxml=embed-junit.xml
+      - name: Assert no demo test was skipped
+        run: uv run --locked python tools/check_embed_junit.py embed-junit.xml

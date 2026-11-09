@@ -1,13 +1,15 @@
 """Build the Mort order-pricing demo once, then run it against every Vex rule script.
 
-    uv run python examples/embed/run.py
+    uv run python examples/embed/run.py [--check]
 
 Needs a Mort checkout (``MORT_ROOT``, or a ``Mort`` directory beside a parent of this repository), ``uv`` on
-PATH to supply ``ziglang``, and CPython's import library for the interpreter running this script.
+PATH to supply ``ziglang``, and CPython's import library (Windows) or shared library (Linux) for the interpreter
+running this script. ``--check`` also fails if the demo's output differs from ``expected.out``.
 """
 
 from __future__ import annotations
 
+import difflib
 import hashlib
 import os
 import shutil
@@ -19,6 +21,7 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
 VEX_MX = ROOT / "embed" / "mort" / "vex.mx"
 DEMO_SOURCE = HERE / "pricing.mx"
+EXPECTED = HERE / "expected.out"
 RULES = [
     "rules/1_standard.vx",
     "rules/2_holiday.vx",
@@ -47,11 +50,15 @@ def find_mort() -> Path:
 
 
 def python_library() -> Path:
-    if os.name != "nt":
-        raise SetupError("this demo's link step has only been written and tested on Windows")
-    library = Path(sys.base_prefix) / "libs" / f"python{sys.version_info.major}{sys.version_info.minor}.lib"
+    major, minor = sys.version_info[:2]
+    if sys.platform == "win32":
+        library = Path(sys.base_prefix) / "libs" / f"python{major}{minor}.lib"
+    elif sys.platform == "linux":
+        library = Path(sys.base_prefix) / "lib" / f"libpython{major}.{minor}.so"
+    else:
+        raise SetupError("this demo's link step has only been written and tested on Windows and Linux")
     if not library.is_file():
-        raise SetupError(f"CPython import library not found: {library}")
+        raise SetupError(f"CPython library to link against not found: {library}")
     return library
 
 
@@ -69,7 +76,7 @@ def toolchain_problem() -> str | None:
 
 def build(source: Path, directory: Path) -> Path:
     """Compile a Mort host once. Raises SetupError if the toolchain fails."""
-    exe = directory / (source.stem + ".exe")
+    exe = directory / (source.stem + (".exe" if os.name == "nt" else ""))
     command = [
         "uv", "run", "--no-project", "--with", "ziglang", "--with", "cryptography",
         "python", str(find_mort() / "mortc.py"), str(source),
@@ -86,6 +93,8 @@ def host_env() -> dict[str, str]:
     env["PYTHONHOME"] = sys.base_prefix
     env["PYTHONPATH"] = str(ROOT / "src")
     env["PATH"] = sys.base_prefix + os.pathsep + env.get("PATH", "")
+    if sys.platform == "linux":
+        env["LD_LIBRARY_PATH"] = str(Path(sys.base_prefix) / "lib") + os.pathsep + env.get("LD_LIBRARY_PATH", "")
     return env
 
 
@@ -98,7 +107,18 @@ def run_demo(exe: Path) -> str:
     return result.stdout
 
 
+def transcript_difference(output: str) -> str | None:
+    """A diff of `output` against the golden transcript, or None if they match."""
+    expected = EXPECTED.read_text(encoding="utf-8").replace("\r\n", "\n")
+    actual = output.replace("\r\n", "\n")
+    if actual == expected:
+        return None
+    lines = difflib.unified_diff(expected.splitlines(), actual.splitlines(), "expected.out", "demo output", lineterm="")
+    return "\n".join(lines)
+
+
 def main() -> int:
+    check = "--check" in sys.argv[1:]
     problem = toolchain_problem()
     if problem is not None:
         print(f"cannot run the demo: {problem}", file=sys.stderr)
@@ -108,9 +128,16 @@ def main() -> int:
     exe = build(DEMO_SOURCE, directory)
     before = hashlib.sha256(exe.read_bytes()).hexdigest()
     print(f"built {exe.name} once: sha256 {before[:16]}")
-    print(run_demo(exe), end="")
+    output = run_demo(exe)
+    print(output, end="")
     after = hashlib.sha256(exe.read_bytes()).hexdigest()
     print(f"same binary ran all {len(RULES)} rule files (sha256 {after[:16]}), no rebuild")
+    if check:
+        difference = transcript_difference(output)
+        if difference is not None:
+            print(f"the demo's output differs from expected.out:\n{difference}", file=sys.stderr)
+            return 1
+        print("output matches expected.out")
     return 0 if before == after else 1
 
 

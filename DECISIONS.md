@@ -382,3 +382,22 @@ Linux against a golden transcript.
 visibly if it stops being true.
 
 **Done means** the demo passes in CI on both platforms and `docs/ffi.md` is enough to write a host without reading `embed.py`.
+
+## D8. Who owns a call's arguments
+
+**Context.** When memory runs out, the VM must release the failed program's values before it builds the error. The arguments of
+a top-level call are among those values, so they have to be released through the list that holds them. On Python 3.10 a
+caller's evaluation stack keeps every argument alive until the call returns, so a temporary list passed to a public method stays
+reachable, with its contents, for the whole call. The VM cannot reach that stack, and it may not empty a list a caller can still
+see. Inferring "nothing else holds this list" from its reference count was tried and rejected: on 3.10 a list owned only by a
+tuple or a `partial` looks like a temporary, so `R(*(code, [1]))`, `partial` and `starmap` had their lists changed.
+
+**Choice.** Two entry points. `VM.run_function` is the public API: it copies its arguments, accepts any sequence, and never
+changes them. `VM.run_owned` is for the VM's own callers (the CLI, the REPL, and `run_function` with its copy): the caller hands over a
+list it no longer holds, which becomes the frame's locals and is emptied if memory runs out.
+
+**Reason.** The property that matters is that the VM releases the program's values before building the error, and the
+ownership transfer makes that deterministic on every Python version. Values a caller of the public API keeps, including a temporary
+that Python 3.10 pins, are the caller's and stay alive until the call returns. That is outside the VM, so the public API does not promise
+to release them. `test_program_values_are_released_before_the_error_is_built` tests `run_owned` on every version, and a separate test
+holds `run_function` to never changing or rejecting its arguments.

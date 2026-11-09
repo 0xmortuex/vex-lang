@@ -17,15 +17,20 @@ import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 RUNNER = ROOT / "examples" / "embed" / "run.py"
+JUNIT_CHECK = ROOT / "tools" / "check_embed_junit.py"
+
+
+def load_module(name: str, path: Path) -> ModuleType:
+    spec = importlib.util.spec_from_file_location(name, path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
 
 
 def load_runner() -> ModuleType:
-    spec = importlib.util.spec_from_file_location("embed_demo_run", RUNNER)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules["embed_demo_run"] = module
-    spec.loader.exec_module(module)
-    return module
+    return load_module("embed_demo_run", RUNNER)
 
 
 @pytest.fixture(scope="module")
@@ -123,3 +128,55 @@ def test_demo_survives_a_script_passing_a_huge_string(runner: Any, tmp_path: Pat
     assert result.returncode == 0, result.stdout + result.stderr
     assert "Mort: no such customer" in result.stdout
     assert "host continues" in result.stdout
+
+
+def test_the_transcript_check_accepts_the_golden_output_with_either_line_ending() -> None:
+    module = load_runner()
+    expected = (ROOT / "examples" / "embed" / "expected.out").read_text(encoding="utf-8")
+    assert module.transcript_difference(expected) is None
+    assert module.transcript_difference(expected.replace("\n", "\r\n")) is None
+
+
+def test_the_transcript_check_reports_a_changed_line() -> None:
+    module = load_runner()
+    expected = (ROOT / "examples" / "embed" / "expected.out").read_text(encoding="utf-8")
+    difference = module.transcript_difference(expected.replace("3645 cents", "3646 cents"))
+    assert difference is not None
+    assert "-  <- 3645 cents" in difference and "+  <- 3646 cents" in difference
+
+
+JUNIT_CASE = '<testcase classname="tests.test_embed_demo" name="{name}">{body}</testcase>'
+ONE_TEST = "def test_a() -> None:\n    pass\n"
+
+
+def junit_problems(tmp_path: Path, source: str, **cases: str) -> list[str]:
+    test_file = tmp_path / "test_embed_demo.py"
+    test_file.write_text(source, encoding="utf-8")
+    junit = tmp_path / "junit.xml"
+    body = "".join(JUNIT_CASE.format(name=name, body=result) for name, result in cases.items())
+    junit.write_text(f"<testsuites><testsuite>{body}</testsuite></testsuites>", encoding="utf-8")
+    problems: list[str] = load_module("check_embed_junit", JUNIT_CHECK).problems(junit, test_file)
+    return problems
+
+
+def test_the_junit_check_passes_when_every_declared_test_ran(tmp_path: Path) -> None:
+    assert junit_problems(tmp_path, ONE_TEST, test_a="") == []
+
+
+def test_the_junit_check_rejects_a_skipped_test_and_gives_the_reason(tmp_path: Path) -> None:
+    problems = junit_problems(tmp_path, ONE_TEST, test_a='<skipped message="no uv"/>')
+    assert len(problems) == 1 and "test_a" in problems[0] and "no uv" in problems[0]
+
+
+def test_the_junit_check_rejects_a_test_that_did_not_run(tmp_path: Path) -> None:
+    problems = junit_problems(tmp_path, ONE_TEST + "\n\ndef test_b() -> None:\n    pass\n", test_a="")
+    assert len(problems) == 1 and "test_b" in problems[0]
+
+
+def test_the_junit_check_rejects_a_failed_test(tmp_path: Path) -> None:
+    problems = junit_problems(tmp_path, ONE_TEST, test_a='<failure message="boom"/>')
+    assert len(problems) == 1 and "test_a" in problems[0]
+
+
+def test_the_junit_check_rejects_a_file_with_no_tests(tmp_path: Path) -> None:
+    assert junit_problems(tmp_path, "x = 1\n") != []

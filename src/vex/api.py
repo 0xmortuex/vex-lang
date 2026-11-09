@@ -10,7 +10,15 @@ from vex import syntax as ast
 from vex.bytecode import Code, all_code, disassemble
 from vex.checker import Checker
 from vex.compiler import Compiler
-from vex.diagnostics import Diagnostic, DiagSink, Source, VexError, out_of_memory_error, too_deep_error
+from vex.diagnostics import (
+    Diagnostic,
+    DiagSink,
+    Source,
+    VexError,
+    drop_tracebacks,
+    out_of_memory_error,
+    too_deep_error,
+)
 from vex.parser import parse_source
 from vex.resolver import Resolver, make_env
 from vex.symbols import Env, FnSym, Scope
@@ -44,6 +52,8 @@ def read_source(path: str) -> Source:
         offset = len(raw[: e.start].decode("utf-8").replace("\r\n", "\n"))
         text = raw.decode("utf-8", errors="replace").replace("\r\n", "\n")
         return Source(path, text, decode_error=(offset, raw[e.start]))
+    except MemoryError:
+        raise OSError("file is too large to read") from None
 
 
 class Loader:
@@ -132,7 +142,7 @@ def compile_source(
     except RecursionError as e:
         raise too_deep_error(e, source) from None
     except MemoryError as e:
-        e.__traceback__ = None  # its frames pin the tokens and syntax tree that filled the heap
+        drop_tracebacks(e)  # its frames pin the tokens and syntax tree that filled the heap
         raise out_of_memory_error(source) from None
 
 

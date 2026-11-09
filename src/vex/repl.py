@@ -12,6 +12,7 @@ from vex.diagnostics import (
     Source,
     VexError,
     VexRuntimeError,
+    drop_tracebacks,
     first_undecodable,
     out_of_memory_error,
     render_all,
@@ -291,7 +292,7 @@ class Session:
             self.journal.rollback()
             raise too_deep_error(e, source) from None
         except MemoryError as e:
-            e.__traceback__ = None  # its frames pin the tokens and syntax tree that filled the heap
+            drop_tracebacks(e)  # its frames pin the tokens and syntax tree that filled the heap
             self.journal.rollback()
             raise out_of_memory_error(source) from None
         if repl_fn is None:
@@ -300,7 +301,7 @@ class Session:
         ret = zonk(repl_fn.ret)
         if not run:
             return show(ret)
-        value = self.vm.run_function(repl_fn.code)
+        value = self.vm.run_owned(repl_fn.code, [])
         if mod.tail is None or is_unit(ret):
             return ""
         return f"{self.vm.show_result(repl_fn.code, value)} : {show(ret)}"
