@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import sys
+from collections.abc import Sequence
 from typing import Any, TextIO
 
 from vex import bytecode as bc
@@ -108,6 +109,7 @@ _DONE = object()
 _TOO_DEEP = "recursion too deep (a deeply nested value, or calls nested through builtins such as `map`)"
 _OUT_OF_MEMORY = "out of memory"
 _RESERVE_BYTES = 1024 * 1024  # room for reporting out of memory when values that cannot be released fill the heap
+_ARGS_PINNED_BY_CALLER = sys.version_info < (3, 11)
 
 
 class VM:
@@ -179,14 +181,19 @@ class VM:
         finally:
             VM.callback_depth -= 1
 
-    def run_function(self, code: Code, args: list[Any] | None = None) -> Any:
+    def run_function(self, code: Code, args: Sequence[Any] | None = None) -> Any:
         """Run a top-level function to completion, converting failures to VexRuntimeError.
 
-        Takes ownership of `args`: the list becomes the frame's locals, so the caller must not reuse it.
+        `args` may be any sequence and the caller can reuse it: it is never changed.
         """
-        # Not a copy: Python 3.10 keeps a call's arguments on the caller's evaluation stack until it returns, so when
-        # memory runs out only emptying this very list can release the values in it.
-        locals_ = [] if args is None else args
+        # Python 3.10 keeps a call's arguments on the caller's evaluation stack until it returns, so when memory runs
+        # out only emptying the list itself can release a temporary's values. That cannot be seen from outside only
+        # if nothing else refers to the list: three references are that stack, `args` and getrefcount's own argument.
+        if _ARGS_PINNED_BY_CALLER and type(args) is list and sys.getrefcount(args) == 3:
+            locals_ = args
+        else:
+            locals_ = [] if args is None else list(args)
+        del args  # on later Pythons a temporary's list dies here, leaving `locals_` as the only reference to its values
         locals_.extend([None] * (code.nlocals - len(locals_)))
         self._oom_code = None
         if self.reserve is None:

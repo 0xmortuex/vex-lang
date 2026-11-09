@@ -693,6 +693,50 @@ def test_program_values_are_released_before_the_error_is_built(monkeypatch: pyte
     assert [name for name, _ in info.value.trace] == ["inner", "outer"]
 
 
+def add_two_code() -> Any:
+    prog = compile_text("fn add_two(mut x: Int) -> Int { x += 2; let y = x; y }\nfn main() {}\n", "<t>")
+    return prog.env.fns["add_two"].code
+
+
+def test_run_function_leaves_a_reused_argument_list_alone() -> None:
+    code = add_two_code()
+    vm = VM(io.StringIO())
+    args = [2]
+    assert vm.run_function(code, args) == 4
+    assert args == [2]
+    assert vm.run_function(code, args) == 4
+    assert args == [2]
+
+
+def test_run_function_accepts_a_tuple_of_arguments() -> None:
+    code = add_two_code()
+    vm = VM(io.StringIO())
+    args = (2,)
+    assert vm.run_function(code, args) == 4
+    assert vm.run_function(code, args) == 4
+    assert args == (2,)
+
+
+def test_running_out_of_memory_does_not_empty_a_list_the_caller_can_still_see(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(stdlib.METHODS["Str"]["upper"], "impl", out_of_memory)
+    prog = compile_text('fn f(x: Int) { "a".upper(); }\nfn main() {}\n', "<t>")
+    code = prog.env.fns["f"].code
+    assert code is not None
+    vm = VM(io.StringIO())
+    named = [1]
+    in_a_container = {"args": [2]}
+
+    def passed_along(args: list[Any]) -> None:
+        vm.run_function(code, args)
+
+    for call in (lambda: vm.run_function(code, named), lambda: vm.run_function(code, in_a_container["args"]),
+                 lambda: passed_along(named)):  # fmt: skip
+        with pytest.raises(VexRuntimeError):
+            call()
+    assert named == [1]
+    assert in_a_container == {"args": [2]}
+
+
 def test_out_of_memory_is_reported_even_if_the_trace_cannot_be_built(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(stdlib.METHODS["Str"]["upper"], "impl", out_of_memory)
     monkeypatch.setattr(VM, "make_trace", out_of_memory)
