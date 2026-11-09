@@ -132,8 +132,22 @@ def compile_source(
     except RecursionError as e:
         raise too_deep_error(e, source) from None
     except MemoryError as e:
-        e.__traceback__ = None  # its frames pin the tokens and syntax tree that filled the heap
+        _drop_tracebacks(e)
         raise out_of_memory_error(source) from None
+
+
+def _drop_tracebacks(error: BaseException | None) -> None:
+    """Release the frames, which pin the tokens and syntax tree that filled the heap, of a whole exception chain.
+
+    The chain has more than one link when unwinding could not allocate a traceback entry: CPython then raises another
+    MemoryError with the first as its context. Each traceback is cut after its first entry as well as dropped, because
+    Python 3.10 keeps that entry, the frame handling the exception, in the handled-exception state until the handler ends.
+    """
+    while error is not None:
+        if error.__traceback__ is not None:
+            error.__traceback__.tb_next = None
+        error.__traceback__ = None
+        error = error.__context__
 
 
 def _compile(

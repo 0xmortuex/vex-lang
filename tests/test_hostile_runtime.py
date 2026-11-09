@@ -693,6 +693,36 @@ def test_program_values_are_released_before_the_error_is_built(monkeypatch: pyte
     assert [name for name, _ in info.value.trace] == ["inner", "outer"]
 
 
+@pytest.mark.parametrize("chained", [False, True], ids=["single", "chained"])
+def test_compile_values_are_released_before_the_error_is_built(monkeypatch: pytest.MonkeyPatch, chained: bool) -> None:
+    # `chained`: unwinding with a full heap cannot allocate traceback entries, and CPython reports that by raising
+    # another MemoryError whose __context__ is the first, so the frames are pinned from inside the chain.
+    refs: list[weakref.ref[Held]] = []
+    released: list[bool] = []
+    real_error = out_of_memory_error
+
+    def failing_compile(*args: object) -> None:
+        held = Held()
+        refs.append(weakref.ref(held))
+        try:
+            raise MemoryError
+        except MemoryError:
+            if chained:
+                raise MemoryError  # noqa: B904 - the implicit __context__ is what this test is about
+            raise
+
+    def spy(source: Source) -> VexError:
+        released.append(refs[0]() is None)
+        return real_error(source)
+
+    monkeypatch.setattr(api, "_compile", failing_compile)
+    monkeypatch.setattr(api, "out_of_memory_error", spy)
+    with pytest.raises(VexError) as info:
+        api.compile_source(Source("<t>", "fn main() {}\n"))
+    assert released == [True]
+    assert info.value.diagnostics[0].code == "out-of-memory"
+
+
 def add_two_code() -> Any:
     prog = compile_text("fn add_two(mut x: Int) -> Int { x += 2; let y = x; y }\nfn main() {}\n", "<t>")
     return prog.env.fns["add_two"].code
