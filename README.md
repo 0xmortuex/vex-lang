@@ -211,7 +211,7 @@ instructions are dispatched first. Anything more would be a different VM.
 
 ```text
 uv sync
-uv run pytest -q              # 5,542 tests, 2,546 of them fuzz cases
+uv run pytest -q              # 6,437 passed and 5 skipped in CI; 2,546 are fuzz cases
 uv run ruff check src tests benchmarks
 uv run mypy --strict src tests
 uv run python benchmarks/run.py
