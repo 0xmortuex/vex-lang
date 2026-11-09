@@ -43,6 +43,8 @@ jobs:
         run: for f in examples/*.vx; do python -m vex run "$f" > /dev/null || exit 1; done
       - name: Benchmarks still run
         run: python benchmarks/run.py
+      - name: Benchmark guard (results and ratio to CPython)
+        run: python benchmarks/suite/run_suite.py --guard
 
   embed-demo:
     name: Embed demo (${{ matrix.os }})

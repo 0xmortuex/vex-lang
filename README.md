@@ -184,6 +184,8 @@ Cheap optimisations that are in: calls go straight to the callee's code object, 
 specialised by static type, local-vs-constant arithmetic and comparisons are fused, and hot
 instructions are dispatched first. Anything more would be a different VM.
 
+[BENCHMARKS.md](BENCHMARKS.md) has a checked five-workload suite, its methodology and the CI guard.
+
 ## Limitations (what Vex is not)
 
 - **Slow** (above). Not for number crunching.
