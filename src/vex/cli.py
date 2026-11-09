@@ -10,7 +10,7 @@ from collections.abc import Callable
 
 from vex import __version__
 from vex.api import compile_file, read_source
-from vex.diagnostics import VexError, VexRuntimeError, render_all
+from vex.diagnostics import VexError, VexRuntimeError, drop_tracebacks, render_all
 from vex.runtime import VexExit
 from vex.vm import VM
 
@@ -36,14 +36,15 @@ def _run_big_stack(call: Callable[[], int]) -> int:
     in Python; a big stack and a high recursion limit keep that a Vex diagnostic or a result
     instead of a crash.
     """
-    result: list[int] = []
-    errors: list[BaseException] = []
+    # Slots made in advance: appending to a list can itself fail once memory has run out, which would lose the error.
+    result = [0]
+    errors: list[BaseException | None] = [None]
 
     def target() -> None:
         try:
-            result.append(call())
+            result[0] = call()
         except BaseException as e:  # re-raised on the main thread below
-            errors.append(e)
+            errors[0] = e
 
     sys.setrecursionlimit(60_000)
     try:
@@ -53,7 +54,7 @@ def _run_big_stack(call: Callable[[], int]) -> int:
     t = threading.Thread(target=target, daemon=True)
     t.start()
     t.join()
-    if errors:
+    if errors[0] is not None:
         raise errors[0]
     return result[0]
 
@@ -183,6 +184,10 @@ def main(argv: list[str] | None = None) -> int:
         return 130
     except OSError as e:  # commands report unreadable sources and `io.*` returns `Err`, so this is stdout or stderr
         return _output_lost(e)
+    except MemoryError as e:  # outside anything that reports it itself, such as reading a line of REPL input
+        drop_tracebacks(e)
+        print("error: out of memory", file=sys.stderr)
+        return EXIT_RUNTIME
     except Exception as e:  # an internal bug: say so plainly instead of a bare traceback
         if os.environ.get("VEX_DEBUG"):
             raise

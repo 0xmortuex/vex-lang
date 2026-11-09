@@ -32,8 +32,10 @@ project, so install from this repository.
 ### Fixed
 
 - `VM.run_function` no longer changes the caller's argument list, so a list can be reused, and accepts a tuple.
-- A program too large to compile reports `out-of-memory` reliably. The report could itself run out of memory because
-  compile frames were still held, depending on the Python version and where the limit landed.
+- A program too large to compile reports `out-of-memory` reliably, in `vex run` and in the REPL, which keeps its
+  session. The report could itself run out of memory because compile frames were still held, depending on the Python
+  version and where the limit landed. Memory running out anywhere else in the CLI is reported as `error: out of memory`
+  with exit code 2, not as an internal error.
 - `break` and `continue` inside an expression no longer corrupt the operand stack. They silently miscompiled
   or hung before, and now unwind held operands to the loop's depth. Arithmetic whose left operand has type
   `Never` also compiles.

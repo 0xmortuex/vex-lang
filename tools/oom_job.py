@@ -77,8 +77,10 @@ class Case:
     repl_input: str = ""  # otherwise fed to the REPL
     exit_code: int = 0
     expected: bytes = b""
+    also_ok: tuple[tuple[int, bytes], ...] = ()  # other (exit code, output) results; these limits land on several paths
 
 
+FIVE_MB_LIST = "[" + "1," * 2_500_000 + "1]"
 CASES = [
     Case("runtime: linked list", 240, exit_code=2, expected=b"out of memory",
          source="enum L { Nil, Cons(Int, L) }\nfn main() { let mut l = Nil; let mut i = 0; while true { l = Cons(i, l); i += 1; } }\n"),
@@ -89,8 +91,13 @@ CASES = [
     Case("runtime: deep recursion", 240, exit_code=2, expected=b"out of memory",
          source="fn f(n: Int, s: Str) -> Int { f(n + 1, s + s.slice(0, 1)) + 1 }\nfn main() { print(f(0, \"x\".repeat(4000))); }\n"),
     Case("compile: one 5 MB line", 210, exit_code=1, expected=b"out-of-memory",
-         source="fn main() { print([" + "1," * 2_500_000 + "1]); }\n"),
+         source=f"fn main() {{ print({FIVE_MB_LIST}); }}\n"),
+    Case("compile: one 5 MB line, 150 MB", 150, exit_code=1, expected=b"out-of-memory", also_ok=((1, b"too large to read"),),
+         source=f"fn main() {{ print({FIVE_MB_LIST}); }}\n"),
     Case("repl: keeps the session", 240, repl_input="let mut xs = [0];\nwhile true { xs.push(xs.len()); }\n1 + 1\n", expected=b"2 : Int"),
+    Case("repl: one 5 MB line, 150 MB", 150, repl_input=f"{FIVE_MB_LIST}\n1 + 1\n", expected=b"2 : Int", also_ok=((2, b"out of memory"),)),
+    Case("repl: one 5 MB line, 190 MB", 190, repl_input=f"{FIVE_MB_LIST}\n1 + 1\n", expected=b"2 : Int", also_ok=((2, b"out of memory"),)),
+    Case("repl: one 5 MB line, 210 MB", 210, repl_input=f"{FIVE_MB_LIST}\n1 + 1\n", expected=b"2 : Int", also_ok=((2, b"out of memory"),)),
 ]  # fmt: skip
 
 
@@ -109,7 +116,7 @@ def main() -> int:
                 args = [sys.executable, "-m", "vex", "repl"]
             done = launch_limited(args, case.repl_input.encode("utf-8"), case.megabytes)
             output = done.stdout + done.stderr
-            passed = done.returncode == case.exit_code and case.expected in output
+            passed = any(done.returncode == code and text in output for code, text in ((case.exit_code, case.expected), *case.also_ok))
             failures += not passed
             print(f"{'ok  ' if passed else 'FAIL'} {case.name}: exit {done.returncode}, want {case.exit_code}; {done.stderr[-160:]!r}", flush=True)
     return 1 if failures else 0

@@ -695,15 +695,14 @@ def test_program_values_are_released_before_the_error_is_built(monkeypatch: pyte
     assert [name for name, _ in info.value.trace] == ["inner", "outer"]
 
 
-@pytest.mark.parametrize("chained", [False, True], ids=["single", "chained"])
-def test_compile_values_are_released_before_the_error_is_built(monkeypatch: pytest.MonkeyPatch, chained: bool) -> None:
-    # `chained`: unwinding with a full heap cannot allocate traceback entries, and CPython reports that by raising
-    # another MemoryError whose __context__ is the first, so the frames are pinned from inside the chain.
-    refs: list[weakref.ref[Held]] = []
-    released: list[bool] = []
-    real_error = out_of_memory_error
+def memory_failure(refs: list[weakref.ref[Held]], chained: bool) -> Callable[..., Any]:
+    """A compile stage that runs out of memory with a watched value in its frame.
 
-    def failing_compile(*args: object) -> None:
+    `chained`: unwinding with a full heap cannot allocate traceback entries, and CPython reports that by raising
+    another MemoryError whose __context__ is the first, so the frames are pinned from inside the chain.
+    """
+
+    def fail(*args: object, **kwargs: object) -> Any:
         held = Held()
         refs.append(weakref.ref(held))
         try:
@@ -713,16 +712,76 @@ def test_compile_values_are_released_before_the_error_is_built(monkeypatch: pyte
                 raise MemoryError  # noqa: B904 - the implicit __context__ is what this test is about
             raise
 
+    return fail
+
+
+@pytest.mark.parametrize("chained", [False, True], ids=["single", "chained"])
+def test_compile_values_are_released_before_the_error_is_built(monkeypatch: pytest.MonkeyPatch, chained: bool) -> None:
+    refs: list[weakref.ref[Held]] = []
+    released: list[bool] = []
+    real_error = out_of_memory_error
+
     def spy(source: Source) -> VexError:
         released.append(refs[0]() is None)
         return real_error(source)
 
-    monkeypatch.setattr(api, "_compile", failing_compile)
+    monkeypatch.setattr(api, "_compile", memory_failure(refs, chained))
     monkeypatch.setattr(api, "out_of_memory_error", spy)
     with pytest.raises(VexError) as info:
         api.compile_source(Source("<t>", "fn main() {}\n"))
     assert released == [True]
     assert info.value.diagnostics[0].code == "out-of-memory"
+
+
+@pytest.mark.parametrize("chained", [False, True], ids=["single", "chained"])
+def test_repl_values_are_released_before_it_rolls_back(monkeypatch: pytest.MonkeyPatch, chained: bool) -> None:
+    refs: list[weakref.ref[Held]] = []
+    released: list[bool] = []
+    session = repl.Session(io.StringIO())
+    real_rollback = session.journal.rollback
+
+    def spy() -> None:
+        released.append(refs[0]() is None)
+        real_rollback()
+
+    monkeypatch.setattr(session.journal, "rollback", spy)
+    monkeypatch.setattr(repl, "parse_source", memory_failure(refs, chained))
+    with pytest.raises(VexError) as info:
+        session.eval("1")
+    assert released == [True]
+    assert info.value.diagnostics[0].code == "out-of-memory"
+
+
+def test_a_file_too_large_to_decode_is_reported_as_unreadable(monkeypatch: pytest.MonkeyPatch) -> None:
+    class Undecodable(bytes):
+        def decode(self, encoding: str = "utf-8", errors: str = "strict") -> str:
+            raise MemoryError
+
+    class File:
+        def __enter__(self) -> File:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            pass
+
+        def read(self) -> bytes:
+            return Undecodable(b"x")
+
+    monkeypatch.setattr(api, "open", lambda *args: File(), raising=False)
+    with pytest.raises(OSError, match="too large"):
+        api.read_source("big.vx")
+
+
+def test_the_cli_reports_memory_running_out_outside_the_compiler(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Any
+) -> None:
+    monkeypatch.setattr(cli, "compile_file", out_of_memory)
+    path = tmp_path / "a.vx"
+    path.write_text("fn main() {}\n", encoding="utf-8")
+    assert cli.main(["run", str(path)]) == cli.EXIT_RUNTIME
+    err = capsys.readouterr().err
+    assert "out of memory" in err
+    assert "internal compiler error" not in err
 
 
 def add_two_code() -> Any:

@@ -11,6 +11,7 @@ from vex.diagnostics import (
     DiagSink,
     Source,
     VexError,
+    drop_tracebacks,
     VexRuntimeError,
     first_undecodable,
     out_of_memory_error,
@@ -291,7 +292,7 @@ class Session:
             self.journal.rollback()
             raise too_deep_error(e, source) from None
         except MemoryError as e:
-            e.__traceback__ = None  # its frames pin the tokens and syntax tree that filled the heap
+            drop_tracebacks(e)  # its frames pin the tokens and syntax tree that filled the heap
             self.journal.rollback()
             raise out_of_memory_error(source) from None
         if repl_fn is None:
