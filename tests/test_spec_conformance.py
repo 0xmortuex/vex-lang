@@ -20,10 +20,12 @@ import pathlib
 import random
 import re
 import sys
+import threading
 from collections import Counter
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from functools import cache
+from typing import TypeVar
 
 import pytest
 
@@ -966,15 +968,43 @@ def repository_programs() -> list[tuple[str, str]]:
     return out
 
 
+_T = TypeVar("_T")
+
+
+def with_deep_recursion(call: Callable[[], _T]) -> _T:
+    """Run ``call`` with a recursion limit the recogniser can use, on a thread with enough C stack for that limit.
+
+    The recogniser spends several Python frames per grammar level. On Python 3.10 every Python call also uses C stack,
+    so at this limit it overflows the main thread's stack on Windows, which ends the process.
+    """
+    limit = sys.getrecursionlimit()
+    result: list[_T] = []
+    errors: list[BaseException] = []
+
+    def target() -> None:
+        try:
+            result.append(call())
+        except BaseException as e:  # re-raised on the calling thread below
+            errors.append(e)
+
+    sys.setrecursionlimit(max(limit, 6000))
+    previous = threading.stack_size(64 * 1024 * 1024)
+    try:
+        thread = threading.Thread(target=target)
+        thread.start()
+        thread.join()
+    finally:
+        threading.stack_size(previous)
+        sys.setrecursionlimit(limit)
+    if errors:
+        raise errors[0]
+    return result[0]
+
+
 def test_repository_programs_get_the_same_verdict() -> None:
     programs = repository_programs()
     assert len(programs) > 100
-    limit = sys.getrecursionlimit()
-    sys.setrecursionlimit(max(limit, 6000))  # the recogniser spends several Python frames per grammar level
-    try:
-        wrong = [(n, d) for n, t in programs if (d := verdicts_agree(t, "module")) is not None]
-    finally:
-        sys.setrecursionlimit(limit)
+    wrong = with_deep_recursion(lambda: [(n, d) for n, t in programs if (d := verdicts_agree(t, "module")) is not None])
     assert not wrong, wrong[:5]
 
 
@@ -1203,12 +1233,7 @@ def spec_code_blocks() -> list[str]:
 
 def test_every_parser_accepted_program_is_in_the_grammar() -> None:
     programs = [t for _, t in repository_programs()] + spec_code_blocks()
-    limit = sys.getrecursionlimit()
-    sys.setrecursionlimit(max(limit, 6000))
-    try:
-        missing = [t for t in programs if parser_accepts(t) and not grammar_accepts(t)]
-    finally:
-        sys.setrecursionlimit(limit)
+    missing = with_deep_recursion(lambda: [t for t in programs if parser_accepts(t) and not grammar_accepts(t)])
     assert not missing, missing[:3]
 
 
@@ -1288,12 +1313,7 @@ EQUIVALENT_LEXICAL = {
 
 
 def test_every_narrowing_of_the_syntax_is_detected() -> None:
-    limit = sys.getrecursionlimit()
-    sys.setrecursionlimit(max(limit, 6000))
-    try:
-        missed = undetected_narrowings()
-    finally:
-        sys.setrecursionlimit(limit)
+    missed = with_deep_recursion(undetected_narrowings)
     assert set(missed) == set(EQUIVALENT_SYNTAX), f"{len(missed)} changes to the grammar go unnoticed: {missed}"
 
 
@@ -1383,19 +1403,19 @@ def _syntax_evidence() -> tuple[list[tuple[str, str]], list[tuple[str, str]], li
 def syntax_narrowing_detected(rules: Rules) -> bool:
     """Does the grammar ``rules`` differ from the parser on anything the tests hold it to?"""
     forms, negative, programs = _syntax_evidence()
-    limit = sys.getrecursionlimit()
-    sys.setrecursionlimit(max(limit, 6000))
-    try:
+
+    def detected() -> bool:
         return (
             any(grammar_events(text, start, rules=rules) is None for start, text in forms)
             or any(grammar_events(text, start, rules=rules) is not None for start, text in negative)
             or any(grammar_events(text, "module", rules=rules) is None for text in programs)
             or any(grammar_events(text, start, rules=rules) is None for g, start, text in call_site_corpus() if g == "syntax")
         )
+
+    try:
+        return with_deep_recursion(detected)
     except RecursionError:  # as in undetected_narrowings: a left-recursive rule no longer parses anything
         return True
-    finally:
-        sys.setrecursionlimit(limit)
 
 
 def lexical_narrowing_detected(rules: Rules) -> bool:
