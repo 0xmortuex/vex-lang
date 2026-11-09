@@ -186,6 +186,14 @@ class VM:
         """
         locals_ = [] if args is None else list(args)
         del args  # on Python 3.11+ a temporary's list dies here, leaving `locals_` as the only reference to its values
+        return self.run_owned(code, locals_)
+
+    def run_owned(self, code: Code, locals_: list[Any]) -> Any:
+        """`run_function` for a caller handing over a list it no longer holds, which becomes the frame's locals.
+
+        The list is changed, and emptied if memory runs out, so that the values in it are released before the error
+        is built. See DECISIONS.md, D8.
+        """
         locals_.extend([None] * (code.nlocals - len(locals_)))
         self._oom_code = None
         if self.reserve is None:

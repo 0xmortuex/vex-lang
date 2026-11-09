@@ -98,7 +98,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     assert prog.main is not None
     vm = VM(args=args.args)
     try:
-        result = vm.run_function(prog.main)
+        result = vm.run_owned(prog.main, [])
     except VexRuntimeError as e:
         _flush_before_reporting()
         print(e.render(), file=sys.stderr)

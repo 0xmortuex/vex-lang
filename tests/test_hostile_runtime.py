@@ -690,7 +690,7 @@ def test_program_values_are_released_before_the_error_is_built(monkeypatch: pyte
 
     monkeypatch.setattr(vm_module, "VexRuntimeError", spy)
     with pytest.raises(real_error) as info:
-        vm.run_function(code, held_arguments())
+        vm.run_owned(code, held_arguments())
     assert released == [True]
     assert [name for name, _ in info.value.trace] == ["inner", "outer"]
 
@@ -812,6 +812,36 @@ def test_run_function_leaves_alone_a_list_owned_only_by_a_tuple_or_partial() -> 
     assert bound() == 4
     calls = [(code, [2])]
     assert list(itertools.starmap(run, calls)) == [4]
+    assert calls[0][1] == [2]
+
+
+def test_public_run_function_never_mutates_or_rejects_its_arguments() -> None:
+    code = add_two_code()
+    vm = VM(io.StringIO())
+    run = vm.run_function
+    reused = [2]
+    packed = (code, [2])
+    tuple_packed = (code, (2,))
+    bound = functools.partial(run, code, [2])
+    bound_tuple = functools.partial(run, code, (2,))
+    calls = [(code, [2]), (code, (2,))]
+
+    results = [
+        run(code, reused),
+        run(code, reused),
+        run(code, (2,)),
+        run(*packed),
+        run(*tuple_packed),
+        bound(),
+        bound(),
+        bound_tuple(),
+        *itertools.starmap(run, calls),
+    ]
+
+    assert results == [4] * 10
+    assert reused == [2]
+    assert packed[1] == [2]
+    assert bound.args[1] == [2]
     assert calls[0][1] == [2]
 
 

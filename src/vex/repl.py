@@ -301,7 +301,7 @@ class Session:
         ret = zonk(repl_fn.ret)
         if not run:
             return show(ret)
-        value = self.vm.run_function(repl_fn.code)
+        value = self.vm.run_owned(repl_fn.code, [])
         if mod.tail is None or is_unit(ret):
             return ""
         return f"{self.vm.show_result(repl_fn.code, value)} : {show(ret)}"
