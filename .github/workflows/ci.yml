@@ -82,7 +82,7 @@ jobs:
       - name: Install the ziglang C backend
         run: |
           uv venv .zig
-          uv pip install --python .zig ziglang
+          uv pip install --python .zig "ziglang==0.17.1"
       - name: Build the demo, run it, compare with expected.out
         run: uv run --locked python examples/embed/run.py --check
       - name: Run the demo tests
