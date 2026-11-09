@@ -10,7 +10,15 @@ from vex import syntax as ast
 from vex.bytecode import Code, all_code, disassemble
 from vex.checker import Checker
 from vex.compiler import Compiler
-from vex.diagnostics import Diagnostic, DiagSink, Source, VexError, drop_tracebacks, out_of_memory_error, too_deep_error
+from vex.diagnostics import (
+    Diagnostic,
+    DiagSink,
+    Source,
+    VexError,
+    drop_tracebacks,
+    out_of_memory_error,
+    too_deep_error,
+)
 from vex.parser import parse_source
 from vex.resolver import Resolver, make_env
 from vex.symbols import Env, FnSym, Scope
