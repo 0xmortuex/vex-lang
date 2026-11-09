@@ -29,7 +29,10 @@ The host must link against the CPython library for **one exact minor version** a
   package (`src` in this repository), and the CPython shared library must be on the loader's path
   (`PATH` on Windows, `LD_LIBRARY_PATH` on Linux).
 
-CPython 3.13 on Windows x86-64 is the only tested combination. Linux and macOS use the same design with a different link flag.
+CI proves one thing about this: the `embed-demo` job builds `examples/embed` from a clean checkout on Windows x86-64 and Linux
+x86-64, with CPython 3.13, `ziglang` as the C backend and a pinned Mort commit, then fails unless the output matches
+`examples/embed/expected.out` and every test in `tests/test_embed_demo.py` ran. Those are the only tested combinations. macOS
+uses the same design with a different link flag and is untested, as are other CPython versions and architectures.
 
 The host imports exactly three symbols from libpython: `Py_Initialize`, `PyRun_SimpleString` and `Py_FinalizeEx`.
 
@@ -322,7 +325,8 @@ Add it to a build with `--package vex=embed/mort/vex.mx --link <libpython>`.
 - Result helpers `vex.return_int`, `return_float`, `return_bool`, `return_unit`, each returning 0 for a one-line success return.
 - `vex.status_name(status) -> *u8` and `vex.c_len(text) -> i64`.
 
-The worked example is `examples/embed/pricing.mx`; run it with `uv run python examples/embed/run.py`.
+The worked example is `examples/embed/pricing.mx`; run it with `uv run python examples/embed/run.py`, adding `--check` to compare
+its output with `expected.out`.
 
 ## Python hosts
 

@@ -16,6 +16,8 @@ project, so install from this repository.
 - Mort binding library (`embed/mort/vex.mx`) and an order-pricing demo in which one Mort executable runs
   swappable Vex rule scripts (`examples/embed/`).
 - `vex.stop()` is refused from inside a running call, and `vex.mx` is safe to use after a stop.
+- CI builds the demo with `ziglang` against a pinned Mort commit on Windows and Linux (CPython 3.13, x86-64), runs
+  it and compares its output with `expected.out`. The job fails if any demo test was skipped.
 
 ### Budget and limits
 
@@ -29,6 +31,9 @@ project, so install from this repository.
 
 ### Fixed
 
+- `VM.run_function` no longer changes the caller's argument list, so a list can be reused, and accepts a tuple.
+- A program too large to compile reports `out-of-memory` reliably. The report could itself run out of memory because
+  compile frames were still held, depending on the Python version and where the limit landed.
 - `break` and `continue` inside an expression no longer corrupt the operand stack. They silently miscompiled
   or hung before, and now unwind held operands to the loop's depth. Arithmetic whose left operand has type
   `Never` also compiles.
