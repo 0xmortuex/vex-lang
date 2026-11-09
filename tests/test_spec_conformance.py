@@ -6,7 +6,8 @@ implementation in both directions:
 * sentences generated from the grammar are accepted by the parser, and every rule and alternative is exercised;
 * each rule has hand-written negative samples which both the parser and the grammar reject;
 * thousands of mutated sentences, and every program in the repository, get the same verdict from both;
-* deleting any one alternative from the grammar makes some sentence stop being accepted.
+* deleting any one alternative from the grammar makes some sentence stop being accepted;
+* every alternative of every rule is exercised at every place that rule is referenced, by a frozen corpus.
 
 So a rule that changes in only the spec, or only the parser, fails here.
 """
@@ -372,7 +373,7 @@ class TokenMatcher(Matcher):
             toks = Lexer(self.source, sink, part[0], part[1]).lex()
             if sink.has_errors:
                 return False
-            sub = TokenMatcher(toks, self.source, self.disabled, self.rules)
+            sub = type(self)(toks, self.source, self.disabled, self.rules)
             if sub.match_ref("interp", 0) != len(toks):
                 return False
             self.events.extend(sub.events)
@@ -1269,6 +1270,8 @@ def undetected_narrowings() -> list[str]:
                 continue
             if any(grammar_events(text, "module", rules=rules) is None for text in programs):
                 continue
+            if any(grammar_events(text, start, rules=rules) is None for g, start, text in call_site_corpus() if g == "syntax"):
+                continue
         except RecursionError:  # dropping a prefix can leave a left-recursive rule, which no longer parses anything
             continue
         missed.append(what)
@@ -1336,6 +1339,8 @@ def undetected_lexical_narrowings() -> list[str]:
             if any(char_full_match(r, s, rules=rules) for r, s in negative):
                 continue
             if any(matches_a_prefix(r, s, rules) for r, s in NO_PREFIX_MATCH):
+                continue
+            if any(not char_full_match(start, text, rules=rules) for g, start, text in call_site_corpus() if g == "lexical"):
                 continue
         except RecursionError:
             continue
@@ -1467,6 +1472,540 @@ def test_narrowing_one_call_site_is_detected(case: SiteNarrowing) -> None:
         assert not char_full_match(case.start, case.witness, rules=narrowed), "the edit does not narrow the grammar"
         detected = lexical_narrowing_detected(narrowed)
     assert detected, f"{case.name}: the spec lost {case.witness!r} and no test noticed"
+
+
+# ------------------------------------------------------------------ every alternative at every call site
+# A triple is (rule, one reference in it, one alternative of the referenced rule). "Alternative" means each branch of a
+# choice, each optional part present and absent, each repetition empty and not, all inside the referenced rule's own
+# body; a rule with no choices has the single alternative "only". References inside a lookahead consume nothing, so they
+# are not call sites. Terminals have no alternatives.
+@dataclass(frozen=True, order=True)
+class Site:
+    rule: str
+    index: int  # which nonterminal reference of the rule, in reading order
+    target: str
+
+    def __str__(self) -> str:
+        return f"{self.rule}#{self.index}->{self.target}"
+
+
+Triple = tuple[Site, str]
+ONLY = "only"
+OPEN_SITE = -2
+CLOSE_SITE = -3
+
+
+def reference_nodes(node: Node) -> Iterator[Ref]:
+    if isinstance(node, Ref):
+        yield node
+    elif isinstance(node, (Seq, Alt)):
+        for item in node.items:
+            yield from reference_nodes(item)
+    elif isinstance(node, (Opt, Rep)):
+        yield from reference_nodes(node.item)
+
+
+class CallSites:
+    """The call sites of one grammar and the alternatives of each rule."""
+
+    def __init__(self, rules: Rules) -> None:
+        self.rules = rules
+        self.sites: list[Site] = []
+        self.ref_of: dict[Site, Ref] = {}
+        self.index_of_ref: dict[int, int] = {}  # id(Ref) -> position in self.sites
+        for name, rule in rules.items():
+            nonterminals = (r for r in reference_nodes(rule) if r.name in rules)
+            for index, ref in enumerate(nonterminals):
+                site = Site(name, index, ref.name)
+                self.index_of_ref[id(ref)] = len(self.sites)
+                self.sites.append(site)
+                self.ref_of[site] = ref
+        self.labels: dict[Event, str] = {}
+        self.owner: dict[int, str] = {}
+        self.choice_node: dict[int, Alt | Opt | Rep] = {}
+        self.alternatives: dict[str, list[str]] = {name: [] for name in rules}
+        self.event_of: dict[tuple[str, str], Event] = {}
+        ordinal: Counter[str] = Counter()
+        for name, node in choice_points(rules):
+            k = ordinal[name]
+            ordinal[name] += 1
+            self.owner[node.uid] = name
+            self.choice_node[node.uid] = node
+            kind = type(node).__name__.lower()
+            for branch in range(len(node.items)) if isinstance(node, Alt) else (0, 1):
+                label = f"{kind}{k}={branch}"
+                self.labels[(node.uid, branch)] = label
+                self.alternatives[name].append(label)
+                self.event_of[(name, label)] = (node.uid, branch)
+
+    def triples(self) -> list[Triple]:
+        return sorted((site, label) for site in self.sites for label in self.alternatives[site.target] or [ONLY])
+
+    def triples_of_events(self, events: Iterable[Event]) -> set[Triple]:
+        """Read a recorded derivation: what each call site expanded to, excluding what nested calls chose."""
+        out: set[Triple] = set()
+        stack: list[tuple[Site, list[str]]] = []
+        for a, b in events:
+            if a == OPEN_SITE:
+                stack.append((self.sites[b], []))
+            elif a == CLOSE_SITE:
+                site, own = stack.pop()
+                out.update((site, label) for label in own or [ONLY])
+            elif a >= 0 and stack and self.owner.get(a) == stack[-1][0].target:
+                label = self.labels.get((a, b))
+                if label is not None:
+                    stack[-1][1].append(label)
+        return out
+
+
+_CALL_SITES: dict[int, CallSites] = {}
+
+
+def call_sites(rules: Rules) -> CallSites:
+    table = _CALL_SITES.get(id(rules))
+    if table is None:
+        table = _CALL_SITES[id(rules)] = CallSites(rules)
+    return table
+
+
+class RecordsCallSites(Matcher):
+    """Brackets each call site in the event list. Memoised results keep their brackets, so a memo hit still counts."""
+
+    def match(self, node: Node, pos: int) -> int:
+        if isinstance(node, Peek):  # lookaheads leave no trace here, whatever they saw
+            mark = len(self.events)
+            end = super().match(node, pos)
+            del self.events[mark:]
+            return end
+        if isinstance(node, Ref):
+            index = call_sites(self.rules).index_of_ref.get(id(node))
+            if index is not None:
+                mark = len(self.events)
+                self.events.append((OPEN_SITE, index))
+                end = super().match(node, pos)
+                if end < 0:
+                    del self.events[mark:]
+                else:
+                    self.events.append((CLOSE_SITE, index))
+                return end
+        return super().match(node, pos)
+
+
+class SiteTokenMatcher(RecordsCallSites, TokenMatcher):
+    pass
+
+
+class SiteCharMatcher(RecordsCallSites, CharMatcher):
+    pass
+
+
+def triples_in(grammar: str, start: str, text: str) -> set[Triple] | None:
+    """The triples a sentence exercises, or None unless the implementation and the grammar both accept it."""
+    if grammar == "syntax":
+        if not parser_accepts(text, repl=start == "repl_input"):
+            return None
+        toks, clean = lex_clean(text)
+        if not clean:
+            return None
+        matcher: Matcher = SiteTokenMatcher(toks, Source("t.vx", text))
+        length = len(toks)
+    else:
+        if not LEXER_ORACLES[start](text):
+            return None
+        matcher = SiteCharMatcher(text)
+        length = len(text)
+    if matcher.match_ref(start, 0) != length:
+        return None
+    return call_sites(matcher.rules).triples_of_events(matcher.events)
+
+
+@dataclass
+class Plan:
+    """What a derivation of one rule must do: choices to make, and a reference to send to a further plan."""
+
+    decisions: dict[int, int]
+    goal: int | None = None  # id() of a Ref
+    inner: Plan | None = None
+
+
+def path_to(node: Node, target: Node) -> dict[int, int] | None:
+    """The choices that make a derivation of ``node`` pass through ``target``."""
+    if node is target:
+        return {}
+    if isinstance(node, Seq):
+        for item in node.items:
+            found = path_to(item, target)
+            if found is not None:
+                return found
+    elif isinstance(node, Alt):
+        for branch, item in enumerate(node.items):
+            found = path_to(item, target)
+            if found is not None:
+                return {node.uid: branch, **found}
+    elif isinstance(node, (Opt, Rep)):
+        found = path_to(node.item, target)
+        if found is not None:
+            return {node.uid: 1, **found}
+    return None
+
+
+class CallSiteGenerator:
+    """Derives short sentences that force one triple, along several routes from a start symbol."""
+
+    MAX_DEPTH = 18
+    MAX_TOKENS = 200
+
+    def __init__(self, table: CallSites, samples: dict[str, list[str]], starts: tuple[str, ...], seed: int) -> None:
+        self.table = table
+        self.rules = table.rules
+        self.samples = samples
+        self.rng = random.Random(seed)
+        self.cost = self.shortest_lengths()
+        self.routes = self.shortest_routes(starts)
+        self.depth = 0
+        self.light = False  # vary only the choice of alternative, so that a required first token stays likely
+
+    def shortest_lengths(self) -> dict[str, float]:
+        cost: dict[str, float] = {name: float("inf") for name in self.rules}
+        changed = True
+        while changed:
+            changed = False
+            for name, rule in self.rules.items():
+                c = self.length(rule, cost)
+                if c < cost[name]:
+                    cost[name] = c
+                    changed = True
+        return cost
+
+    def length(self, node: Node, cost: dict[str, float]) -> float:
+        if isinstance(node, Lit):
+            return 1
+        if isinstance(node, Ref):
+            return cost.get(node.name, 1)
+        if isinstance(node, Seq):
+            return sum(self.length(i, cost) for i in node.items)
+        if isinstance(node, Alt):
+            return min(self.length(i, cost) for i in node.items)
+        if isinstance(node, Peek):  # a branch that only some followers allow: `return` must not be the default operand
+            return 2
+        return 0
+
+    def shortest_routes(self, starts: tuple[str, ...]) -> dict[str, list[Site]]:
+        routes: dict[str, list[Site]] = {start: [] for start in starts}
+        queue = list(starts)
+        for name in queue:
+            for site in self.table.sites:
+                if site.rule == name and site.target not in routes:
+                    routes[site.target] = [*routes[name], site]
+                    queue.append(site.target)
+        return routes
+
+    def route_variants(self, rule: str) -> list[list[Site]]:
+        """The shortest route, and each one-step change of it to another reference to the same rule.
+
+        The second operand of ``expr`` is what separates `return a..b` from a `return a` that lost its range and let
+        the enclosing expression take it: sentences must also appear where the enclosing construct is already used up.
+        """
+        base = self.routes[rule]
+        out = [base]
+        for i, step in enumerate(base):
+            for other in self.table.sites:
+                if other != step and other.rule == step.rule and other.target == step.target:
+                    out.append([*base[:i], other, *base[i + 1 :]])
+        return out
+
+    def path_between(self, source: str, target: str) -> list[Site] | None:
+        found: dict[str, list[Site]] = {source: []}
+        queue = [source]
+        for name in queue:
+            if name == target:
+                return found[name]
+            for site in self.table.sites:
+                if site.rule == name and site.target not in found:
+                    found[site.target] = [*found[name], site]
+                    queue.append(site.target)
+        return None
+
+    def closing_sites(self) -> list[Site]:
+        """References inside an optional part that repeat an earlier reference of the rule, like the right of ``a..b``."""
+        out: list[Site] = []
+        for name, rule in self.rules.items():
+            for node in walk_node(rule):
+                if not isinstance(node, Opt):
+                    continue
+                for ref in reference_nodes(node.item):
+                    index = self.table.index_of_ref.get(id(ref))
+                    if index is not None:
+                        site = self.table.sites[index]
+                        if any(s.rule == name and s.target == site.target and s.index < site.index for s in self.table.sites):
+                            out.append(site)
+        return out
+
+    def closing_routes(self, rule: str) -> list[list[Site]]:
+        """Routes through a used-up optional operand: nothing around the sentence can absorb what a narrowing lost."""
+        out: list[list[Site]] = []
+        for site in self.closing_sites():
+            if site.rule in self.routes:
+                tail = self.path_between(site.target, rule)
+                if tail is not None:
+                    out.append([*self.routes[site.rule], site, *tail])
+        return out
+
+    def alternate_routes(self, rule: str) -> list[list[Site]]:
+        """Routes through each caller and caller's caller: a form the shortest route parses differently may fit here."""
+        out: list[list[Site]] = []
+        for parent in self.table.sites:
+            if parent.target != rule or parent.rule not in self.routes:
+                continue
+            out.append([*self.routes[parent.rule], parent])
+            for grandparent in self.table.sites:
+                if grandparent.target == parent.rule and grandparent.rule in self.routes:
+                    out.append([*self.routes[grandparent.rule], grandparent, parent])
+        return out
+
+    def plan(self, route: list[Site], site: Site, label: str) -> Plan:
+        leaf = Plan({})
+        if label != ONLY:
+            uid, branch = self.table.event_of[(site.target, label)]
+            ancestors = path_to(self.rules[site.target], self.table.choice_node[uid])
+            assert ancestors is not None
+            leaf = Plan({**ancestors, uid: branch})
+        for step in [*route, site][::-1]:
+            ref = self.table.ref_of[step]
+            found = path_to(self.rules[step.rule], ref)
+            assert found is not None, step
+            leaf = Plan(found, id(ref), leaf)
+        return leaf
+
+    def derive(self, name: str, plan: Plan | None, out: list[str], noise: bool) -> None:
+        self.depth += 1
+        try:
+            self.emit(self.rules[name], plan, out, noise and self.depth <= self.MAX_DEPTH and len(out) < self.MAX_TOKENS)
+        finally:
+            self.depth -= 1
+
+    def emit(self, node: Node, plan: Plan | None, out: list[str], noise: bool) -> None:
+        decisions = plan.decisions if plan is not None else {}
+        if isinstance(node, Lit):
+            out.append(node.text)
+        elif isinstance(node, Ref):
+            if node.name not in self.rules:
+                options = self.samples[node.name]
+                out.append(self.rng.choice(options) if noise else options[0])
+            else:
+                aiming = plan is not None and plan.goal == id(node)
+                self.derive(node.name, plan.inner if aiming and plan is not None else None, out, noise)
+        elif isinstance(node, Seq):
+            for i, item in enumerate(node.items):
+                before = node.items[i - 1] if i else None
+                if isinstance(before, Peek) and before.want and literals(before.item):
+                    self.emit_starting(item, literals(before.item), plan, out, noise)
+                else:
+                    self.emit(item, plan, out, noise)
+        elif isinstance(node, Alt):
+            branch = decisions.get(node.uid)
+            self.emit(node.items[self.pick(node, noise) if branch is None else branch], plan, out, noise)
+        elif isinstance(node, Opt):
+            decided = decisions.get(node.uid)
+            if decided == 1 or (decided is None and noise and not self.light and self.rng.random() < 0.3):
+                self.emit(node.item, plan, out, noise)
+        elif isinstance(node, Rep):
+            decided = decisions.get(node.uid)
+            count = decided if decided is not None else (self.rng.randrange(3) if noise and not self.light else 0)
+            if decided == 1 and noise and self.rng.random() < 0.5:  # the forced repetition need not be the first
+                self.emit(node.item, None, out, noise)
+            for _ in range(count):
+                self.emit(node.item, plan, out, noise)
+
+    def emit_starting(self, node: Node, first: set[str], plan: Plan | None, out: list[str], noise: bool) -> None:
+        """Honour ``&"x"`` by retrying, with variation, until the expansion starts with an allowed token."""
+        mark = len(out)
+        for token in sorted(first):
+            lead = self.lead(node, token, frozenset())
+            if lead is not None:
+                del out[mark:]
+                self.emit(node, _merged(plan, lead), out, noise)
+                if len(out) > mark and out[mark] in first:
+                    return
+        for attempt in range(16):
+            del out[mark:]
+            self.emit(node, plan, out, noise or attempt > 0)
+            if len(out) > mark and out[mark] in first:
+                return
+
+    def lead(self, node: Node, token: str, seen: frozenset[str]) -> Plan | None:
+        """A plan making the expansion of ``node`` begin with ``token``."""
+        if isinstance(node, Lit):
+            return Plan({}) if node.text == token else None
+        if isinstance(node, Ref):
+            if node.name not in self.rules or node.name in seen:
+                return None
+            inner = self.lead(self.rules[node.name], token, seen | {node.name})
+            return None if inner is None else Plan({}, id(node), inner)
+        if isinstance(node, Seq):
+            first = next((i for i in node.items if not isinstance(i, Peek)), None)
+            return None if first is None else self.lead(first, token, seen)
+        if isinstance(node, Alt):
+            for branch, item in enumerate(node.items):
+                found = self.lead(item, token, seen)
+                if found is not None:
+                    return Plan({node.uid: branch, **found.decisions}, found.goal, found.inner)
+            return None
+        if isinstance(node, (Opt, Rep)):
+            found = self.lead(node.item, token, seen)
+            return None if found is None else Plan({node.uid: 1, **found.decisions}, found.goal, found.inner)
+        return None
+
+    def pick(self, node: Alt, noise: bool) -> int:
+        lengths = [self.length(item, self.cost) for item in node.items]
+        best = min(lengths)
+        if noise:
+            return self.rng.choice([i for i, n in enumerate(lengths) if n <= best + 3])
+        shortest = [i for i, n in enumerate(lengths) if n == best]
+        plain = [i for i in shortest if not _starts_with_lookahead(node.items[i])]
+        return (plain or shortest)[0]
+
+    def attempt(self, route: list[Site], site: Site, label: str, noise: bool, light: bool = False) -> tuple[str, str]:
+        """One candidate sentence: (start symbol, text)."""
+        self.light = light
+        start = route[0].rule if route else site.rule
+        tokens: list[str] = []
+        self.derive(start, self.plan(route, site, label), tokens, noise)
+        if start == "interp":
+            return "module", 'fn m ( ) { "{' + " ".join(t for t in tokens if t) + '}" ; }'
+        return start, ("" if self.samples is CHAR_SAMPLES else " ").join(tokens)
+
+
+def _merged(plan: Plan | None, lead: Plan) -> Plan:
+    """``plan`` also obeying ``lead``, with ``plan`` winning where the two disagree."""
+    if plan is None:
+        return lead
+    if plan.goal is None:
+        return Plan({**lead.decisions, **plan.decisions}, lead.goal, lead.inner)
+    if plan.goal == lead.goal and lead.inner is not None:
+        return Plan({**lead.decisions, **plan.decisions}, plan.goal, _merged(plan.inner, lead.inner))
+    return Plan({**lead.decisions, **plan.decisions}, plan.goal, plan.inner)
+
+
+def _starts_with_lookahead(node: Node) -> bool:
+    return isinstance(node, Peek) or (isinstance(node, Seq) and isinstance(node.items[0], Peek))
+
+
+GRAMMARS = ("syntax", "lexical")
+ATTEMPTS = 30
+
+
+def rules_of(grammar: str) -> Rules:
+    return syntax_rules() if grammar == "syntax" else lexical_rules()
+
+
+def generate_call_site_sentences(grammar: str) -> tuple[list[tuple[str, str]], set[Triple]]:
+    """Sentences (start, text) exercising every triple the generator can reach, and the set it reached."""
+    table = call_sites(rules_of(grammar))
+    if grammar == "syntax":
+        gen = CallSiteGenerator(table, TOKEN_SAMPLES, ("module", "repl_input", "interp"), SEED)
+    else:
+        gen = CallSiteGenerator(table, CHAR_SAMPLES, tuple(_lexical_positive_rules()), SEED)
+    sentences: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    covered: set[Triple] = set()
+    for triple in table.triples():
+        site, label = triple
+        if site.rule not in gen.routes:
+            continue
+        for number, route in enumerate([*gen.route_variants(site.rule), *gen.closing_routes(site.rule)]):
+            if number == 0 and triple in covered:
+                continue  # the plain route is only for reaching the triple; the variants are for telling forms apart
+            for attempt in range(ATTEMPTS):
+                candidate = gen.attempt(route, site, label, attempt > 0, attempt % 2 == 1)
+                found = triples_in(grammar, *candidate)
+                if found is not None and triple in found:
+                    covered |= found
+                    if candidate not in seen:
+                        seen.add(candidate)
+                        sentences.append(candidate)
+                    break
+        if triple not in covered:
+            for route in gen.alternate_routes(site.rule):
+                candidate = gen.attempt(route, site, label, False)
+                found = triples_in(grammar, *candidate)
+                if found is not None and triple in found:
+                    covered |= found
+                    seen.add(candidate)
+                    sentences.append(candidate)
+                    break
+    return sentences, covered
+
+
+def write_call_site_corpus() -> None:
+    """Regenerate the corpus: ``python tests/test_spec_conformance.py`` after a deliberate change to the grammar."""
+    lines: list[str] = []
+    for grammar in GRAMMARS:
+        sentences, _ = generate_call_site_sentences(grammar)
+        lines.extend(json.dumps([grammar, start, text]) for start, text in sentences)
+    CALL_SITE_CORPUS.write_text("".join(line + "\n" for line in lines), encoding="utf-8", newline="\n")
+    print(f"{len(lines)} sentences in {CALL_SITE_CORPUS}")
+
+
+# A triple the grammar allows on paper but no sentence can exercise, with the reason. A stale entry fails the check.
+_FIRST_SUFFIX = "`&( . | ? )` in block_led makes the first suffix of this led_tail branch a field access or `?`"
+_RETURN_ABSORBS = "the operand of `return` takes every following suffix, and a bare `return` cannot be followed by one"
+UNREACHABLE_TRIPLES: dict[str, dict[str, str]] = {
+    "syntax": {
+        "led_tail#4->suffix:alt0=0": _FIRST_SUFFIX,
+        "led_tail#4->suffix:alt0=1": _FIRST_SUFFIX,
+        "led_tail#4->suffix:opt1=0": _FIRST_SUFFIX,
+        "led_tail#4->suffix:opt1=1": _FIRST_SUFFIX,
+        "place#0->primary:alt0=1": _RETURN_ABSORBS,
+    },
+    "lexical": {},
+}
+
+
+def describe(triple: Triple) -> str:
+    return f"{triple[0]}:{triple[1]}"
+
+
+def corpus_coverage(grammar: str) -> set[Triple]:
+    covered: set[Triple] = set()
+    for g, start, text in call_site_corpus():
+        if g == grammar:
+            found = triples_in(grammar, start, text)
+            assert found is not None, f"the corpus has a sentence the implementation or grammar rejects: {text!r}"
+            covered |= found
+    return covered
+
+
+@pytest.mark.parametrize("grammar", GRAMMARS)
+def test_every_call_site_alternative_is_covered_or_justified(grammar: str) -> None:
+    table = call_sites(rules_of(grammar))
+    assert table.triples(), "no call sites found"
+    covered = corpus_coverage(grammar)
+    uncovered = {describe(t) for t in table.triples() if t not in covered}
+    allowed = UNREACHABLE_TRIPLES[grammar]
+    assert all(reason.strip() for reason in allowed.values()), "an allow-list entry has no reason"
+    assert uncovered - set(allowed) == set(), f"{len(uncovered - set(allowed))} triples are uncovered: {sorted(uncovered - set(allowed))[:20]}"
+    assert set(allowed) - uncovered == set(), f"stale allow-list entries: {sorted(set(allowed) - uncovered)}"
+
+
+@pytest.mark.parametrize("grammar", GRAMMARS)
+def test_the_generator_reaches_every_triple_the_corpus_needs(grammar: str) -> None:
+    """The corpus is not a hand-kept list: the generator regenerates complete coverage from the grammar."""
+    table = call_sites(rules_of(grammar))
+    _, reached = generate_call_site_sentences(grammar)
+    missing = {describe(t) for t in table.triples() if t not in reached} - set(UNREACHABLE_TRIPLES[grammar])
+    assert not missing, sorted(missing)[:20]
+
+
+def test_recorded_triples_are_those_of_the_direct_call_only() -> None:
+    """A range nested in a parenthesis inside a map key is not a range at the map key."""
+    table = call_sites(syntax_rules())
+    site = next(s for s in table.sites if s.rule == "map_entry" and s.index == 0)
+    label = next(lab for lab in table.alternatives["expr"] if lab.endswith("=1"))
+    found = triples_in("syntax", "module", "fn m ( ) { #{ ( a .. b ) : c } ; }")
+    assert found is not None and (site, label) not in found
+    found = triples_in("syntax", "module", "fn m ( ) { #{ a .. b : c } ; }")
+    assert found is not None and (site, label) in found
 
 
 # ------------------------------------------------------------------ rules that depend on token values or context
@@ -1645,3 +2184,7 @@ def test_spec_example(example: Example) -> None:
     assert kind == example.kind, text
     assert text == example.expected
     assert code is None
+
+
+if __name__ == "__main__":
+    write_call_site_corpus()
