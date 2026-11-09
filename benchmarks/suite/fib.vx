@@ -1,0 +1,15 @@
+// Recursive Fibonacci: calls and integer arithmetic.
+fn size() -> Int {
+    match env.args()[0].to_int() {
+        Some(n) => n,
+        None => panic("size must be an integer"),
+    }
+}
+
+fn fib(n: Int) -> Int {
+    if n < 2 { n } else { fib(n - 1) + fib(n - 2) }
+}
+
+fn main() {
+    print(fib(size()));
+}

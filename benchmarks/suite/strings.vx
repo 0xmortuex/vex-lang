@@ -1,0 +1,30 @@
+// String workload: build, split, search, change case and hash each character.
+fn size() -> Int {
+    match env.args()[0].to_int() {
+        Some(n) => n,
+        None => panic("size must be an integer"),
+    }
+}
+
+fn main() {
+    let n = size();
+    let modulus = 2147483647;
+    let mut h = 7;
+    let mut hits = 0;
+    let mut total = 0;
+    for i in 0..n {
+        let s = "item-{i}-{i * 7}";
+        let parts = s.split("-");
+        if s.contains("99") {
+            hits += 1;
+        }
+        let u = s.upper();
+        total += u.len() + parts[1].len();
+        for c in u.chars() {
+            h = (h * 31 + c.code()) % modulus;
+        }
+    }
+    print(h);
+    print(hits);
+    print(total);
+}
